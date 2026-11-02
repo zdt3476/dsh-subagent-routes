@@ -1,0 +1,11 @@
+# 依赖与构建产物之外，只保留必要说明
+node_modules/
+artifacts/
+*.log
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
