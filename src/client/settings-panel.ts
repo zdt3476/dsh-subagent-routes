@@ -1,7 +1,7 @@
 import { createElement as h, useEffect, useState, type ReactElement } from 'react'
-import type { CatalogProviderGroup, PluginConfig, RouteSpec, SettingsSnapshot, WorkspaceEntry, WorkspaceRoute } from '../shared/settings'
+import type { PluginConfig, RouteSpec, SettingsSnapshot, WorkspaceEntry, WorkspaceRoute } from '../shared/settings'
 import { parseSimpleRouteYaml, serializeRouteTable } from '../shared/yaml-utils'
-import { decodeModelKey, encodeModelKey, locateModel, resetEffortFor } from './catalog'
+import { RouteFields, type RouteFieldsClasses } from './route-fields'
 import { settingsApi, type SettingsApi } from './services'
 import { SETTINGS_CSS } from './styles'
 
@@ -10,13 +10,22 @@ export interface SettingsProps {
   api?: SettingsApi
 }
 
-const GENERIC_REASONING_OPTIONS = [
-  { value: '', label: '继承或模型默认' },
-  { value: 'low', label: '低 (low) - 快速响应' },
-  { value: 'medium', label: '中 (medium) - 平衡' },
-  { value: 'high', label: '高 (high) - 深度推理' },
-  { value: 'max', label: '最大 (max) - 极限思考' },
-]
+/**
+ * 设置页命名空间下的选择器样式类名。
+ *
+ * input / select 留空：设置页的样式挂在 `.sr-field` 后代选择器上
+ * （`.sr-field input {...}`），组件里再写类名反而会重复。
+ */
+const SETTINGS_CLASSES: RouteFieldsClasses = {
+  grid: 'sr-form-grid',
+  field: 'sr-field',
+  fieldHead: 'sr-field-head',
+  label: '',
+  link: 'sr-field-link',
+  input: '',
+  select: '',
+  hint: 'sr-hint',
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -38,206 +47,6 @@ interface FormState {
 
 const EMPTY_FORM: FormState = { path: '', provider: '', model: '', reasoningEffort: '' }
 
-interface ModelRouteFieldsProps {
-  provider: string
-  model: string
-  reasoningEffort: string
-  catalog?: CatalogProviderGroup[]
-  disabled?: boolean
-  allowInherit?: boolean
-  onChange: (next: { provider: string; model: string; reasoningEffort: string }) => void
-}
-
-/**
- * 智能联动模型选择器：
- * 1. Provider：默认从宿主已配置的 Provider 列表中选择，仅在没有目录时退回手动输入；
- * 2. Model：默认从列表选择。未选 Provider 时按厂商分组列出全部可用模型，选中即自动回填 Provider；
- * 3. 思考等级：跟随所选模型的真实元数据，不支持则禁用并清空，支持则只呈现该模型的专属档位。
- */
-function ModelRouteFields({
-  provider,
-  model,
-  reasoningEffort,
-  catalog,
-  disabled = false,
-  allowInherit = false,
-  onChange,
-}: ModelRouteFieldsProps): ReactElement {
-  const hasCatalog = Array.isArray(catalog) && catalog.length > 0
-  const matchedGroup = hasCatalog ? catalog.find(group => group.id === provider) : undefined
-  /** 在整份目录里定位模型，用于在未选 Provider 时也能解析思考等级元数据。 */
-  const located = locateModel(catalog, model)
-
-  const modelsInGroup = matchedGroup?.models ?? []
-  const matchedModel = matchedGroup ? modelsInGroup.find(item => item.id === model) : located?.entry
-  const [customProvider, setCustomProvider] = useState<boolean>(!hasCatalog || (Boolean(provider) && !matchedGroup))
-  const [customModel, setCustomModel] = useState<boolean>(!hasCatalog || (Boolean(model) && !located))
-
-  // 思考能力元数据
-  const reasoningInfo = matchedModel?.reasoning
-  const isReasoningExplicitlyUnsupported = Boolean(matchedModel && (!reasoningInfo || !reasoningInfo.efforts || reasoningInfo.efforts.length === 0))
-  const isReasoningSupported = Boolean(reasoningInfo && reasoningInfo.efforts && reasoningInfo.efforts.length > 0)
-
-  // 处理 Provider 下拉变动：切换后若当前模型不属于新厂商，自动落到其首个模型
-  const handleProviderSelect = (val: string) => {
-    if (val === '__custom__') {
-      setCustomProvider(true)
-      return
-    }
-    setCustomProvider(false)
-    const newModels = catalog?.find(group => group.id === val)?.models ?? []
-    const nextModel = newModels.some(item => item.id === model) ? model : (newModels[0]?.id ?? '')
-    const target = newModels.find(item => item.id === nextModel)
-    onChange({ provider: val, model: nextModel, reasoningEffort: resetEffortFor(reasoningEffort, target) })
-  }
-
-  // 处理 Model 下拉变动：选中项自带所属厂商，未指定 Provider 时自动补全
-  const handleModelSelect = (val: string) => {
-    if (val === '__custom__') {
-      setCustomModel(true)
-      return
-    }
-    setCustomModel(false)
-    if (val === '') {
-      onChange({ provider, model: '', reasoningEffort })
-      return
-    }
-    const picked = decodeModelKey(val)
-    if (picked === undefined) return
-    const target = catalog?.find(group => group.id === picked.provider)?.models.find(item => item.id === picked.model)
-    onChange({
-      provider: picked.provider,
-      model: picked.model,
-      reasoningEffort: resetEffortFor(reasoningEffort, target),
-    })
-  }
-
-  // Provider 区域渲染
-  const providerField = h('div', { className: 'sr-field' },
-    h('div', { className: 'sr-field-head' },
-      h('label', null, 'Provider（提供商）'),
-      hasCatalog ? h('button', {
-        type: 'button',
-        className: 'sr-field-link',
-        disabled,
-        onClick: () => {
-          const nextCustom = !customProvider
-          setCustomProvider(nextCustom)
-          if (nextCustom) setCustomModel(true)
-        },
-      }, customProvider ? '从列表选择' : '手动输入') : null,
-    ),
-    customProvider || !hasCatalog ? h('input', {
-      type: 'text',
-      placeholder: '例如 openai / anthropic / deepseek',
-      value: provider,
-      disabled,
-      onChange: (e: { target: { value: string } }) => onChange({
-        provider: e.target.value.trim(),
-        model,
-        reasoningEffort,
-      }),
-    }) : h('select', {
-      value: matchedGroup ? provider : '',
-      disabled,
-      onChange: (e: { target: { value: string } }) => handleProviderSelect(e.target.value),
-    },
-      h('option', { value: '' }, allowInherit ? '（继承主会话提供商）' : '（请选择提供商）'),
-      catalog.map(group => h('option', { key: group.id, value: group.id }, `${group.name || group.id} (${group.id})`)),
-      h('option', { value: '__custom__' }, '+ 手动输入其他提供商…'),
-    ),
-  )
-
-  // Model 区域渲染：默认列表；未选定厂商时按厂商分组展示全部模型
-  const modelGroups = matchedGroup ? [matchedGroup] : (catalog ?? [])
-  const modelOptions = modelGroups
-    .filter(group => group.models.length > 0)
-    .map(group => h('optgroup', { key: group.id, label: group.name || group.id },
-      group.models.map(item => h('option', {
-        key: encodeModelKey(group.id, item.id),
-        value: encodeModelKey(group.id, item.id),
-      }, item.name && item.name !== item.id ? `${item.name} (${item.id})` : item.id)),
-    ))
-
-  const modelField = h('div', { className: 'sr-field' },
-    h('div', { className: 'sr-field-head' },
-      h('label', null, '模型名称 (Model)'),
-      hasCatalog ? h('button', {
-        type: 'button',
-        className: 'sr-field-link',
-        disabled,
-        onClick: () => setCustomModel(!customModel),
-      }, customModel ? '从列表选择' : '手动输入') : null,
-    ),
-    customModel || !hasCatalog ? h('input', {
-      type: 'text',
-      placeholder: '例如 gpt-4.1 / claude-sonnet-4',
-      value: model,
-      disabled,
-      onChange: (e: { target: { value: string } }) => onChange({
-        provider,
-        model: e.target.value.trim(),
-        reasoningEffort,
-      }),
-    }) : h('select', {
-      value: model && (matchedModel !== undefined || located !== undefined) ? encodeModelKey(provider || located?.group.id || '', model) : '',
-      disabled,
-      onChange: (e: { target: { value: string } }) => handleModelSelect(e.target.value),
-    },
-      h('option', { value: '' }, allowInherit ? '（继承主会话模型）' : '（请选择模型）'),
-      modelOptions,
-      h('option', { value: '__custom__' }, '+ 手动输入其他模型 ID…'),
-    ),
-  )
-
-  // Reasoning Effort 思考等级渲染（根据模型元数据强联动）
-  let reasoningSelectContent: ReactElement
-  let reasoningHint = ''
-
-  if (isReasoningExplicitlyUnsupported) {
-    reasoningSelectContent = h('select', {
-      value: '',
-      disabled: true,
-      title: '当前模型不支持思考等级',
-    }, h('option', { value: '' }, '该模型不支持思考等级'))
-    reasoningHint = '所选模型无深度思考/推理模式，已自动禁用'
-  } else if (isReasoningSupported && reasoningInfo) {
-    reasoningSelectContent = h('select', {
-      value: reasoningEffort,
-      disabled,
-      onChange: (e: { target: { value: string } }) => onChange({
-        provider,
-        model,
-        reasoningEffort: e.target.value,
-      }),
-    },
-      h('option', { value: '' }, `继承或模型默认${reasoningInfo.defaultEffort ? ` (${reasoningInfo.defaultEffort})` : ''}`),
-      reasoningInfo.efforts.map(eff => h('option', { key: eff.id, value: eff.id }, `${eff.name || eff.id} (${eff.id})${eff.description ? ` - ${eff.description}` : ''}`)),
-    )
-    reasoningHint = '已智能联动该模型支持的专属思考档位'
-  } else {
-    reasoningSelectContent = h('select', {
-      value: reasoningEffort,
-      disabled,
-      onChange: (e: { target: { value: string } }) => onChange({
-        provider,
-        model,
-        reasoningEffort: e.target.value,
-      }),
-    }, GENERIC_REASONING_OPTIONS.map(opt => h('option', { key: opt.value, value: opt.value }, opt.label)))
-    reasoningHint = '通用思考等级档位'
-  }
-
-  const reasoningField = h('div', { className: 'sr-field' },
-    h('div', { className: 'sr-field-head' },
-      h('label', null, '思考等级 (Reasoning Effort)'),
-    ),
-    reasoningSelectContent,
-    reasoningHint ? h('span', { className: 'sr-hint', style: { fontSize: 11 } }, reasoningHint) : null,
-  )
-
-  return h('div', { className: 'sr-form-grid' }, providerField, modelField, reasoningField)
-}
 
 interface WorkspacePathFieldProps {
   value: string
@@ -591,13 +400,14 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       h('h4', { className: 'sr-card-title' }, '全局默认模型（未匹配项目时使用）'),
     ),
     h('p', { className: 'sr-card-desc' }, '当子代理所在的工作区没有匹配到下方专属规则时使用。留空则直接继承父会话的模型。'),
-    h(ModelRouteFields, {
+    h(RouteFields, {
       provider: fallback.provider ?? '',
       model: fallback.model ?? '',
       reasoningEffort: fallback.reasoningEffort ?? '',
       catalog: snapshot.catalog,
       disabled: isBlocked,
       allowInherit: true,
+      classes: SETTINGS_CLASSES,
       onChange: next => handleFallbackChange(next),
     }),
   )
@@ -614,13 +424,14 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
         onChange: path => setFormState(current => ({ ...current, path })),
       }),
       h('span', { className: 'sr-hint' }, '子代理在该目录或其子目录中派活时将生效（更长路径优先）。'),
-      h(ModelRouteFields, {
+      h(RouteFields, {
         provider: formState.provider,
         model: formState.model,
         reasoningEffort: formState.reasoningEffort,
         catalog: snapshot.catalog,
         disabled: isBlocked,
         allowInherit: true,
+        classes: SETTINGS_CLASSES,
         onChange: next => setFormState({
           ...formState,
           provider: next.provider,

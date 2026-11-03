@@ -167,16 +167,29 @@ export function isUnder(target: string, prefix: string): boolean {
 }
 
 /**
- * 按最长前缀匹配选出该目录的路由。
+ * 按最长前缀匹配选出该目录的路由，并保留命中的目录。
  *
- * 最长前缀优先，使 `/repo/legacy` 能覆盖 `/repo`；没有匹配时回落到 fallback。
+ * 最长前缀优先，使 `/repo/legacy` 能覆盖 `/repo`；没有匹配时回落到 fallback
+ * （此时 `path` 为 undefined，用来区分「命中了项目规则」与「只是全局兜底」）。
  */
-export function matchRoute(table: RouteTable, directory: string): RouteSpec | undefined {
+export function matchRouteWithPath(
+  table: RouteTable,
+  directory: string,
+): { spec: RouteSpec; path?: string } | undefined {
   let best: WorkspaceRoute | undefined
   for (const route of table.routes) {
     if (!isUnder(directory, route.path)) continue
     if (best === undefined || route.path.length > best.path.length) best = route
   }
-  if (best !== undefined) return best
-  return table.fallback
+  if (best !== undefined) return { spec: best, path: best.path }
+  return table.fallback === undefined ? undefined : { spec: table.fallback }
+}
+
+/**
+ * 按最长前缀匹配选出该目录的路由。
+ *
+ * 最长前缀优先，使 `/repo/legacy` 能覆盖 `/repo`；没有匹配时回落到 fallback。
+ */
+export function matchRoute(table: RouteTable, directory: string): RouteSpec | undefined {
+  return matchRouteWithPath(table, directory)?.spec
 }

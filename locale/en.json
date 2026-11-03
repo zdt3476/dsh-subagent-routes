@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Subagent workspace routes",
-    "description": "Assign provider, model and reasoning effort to subagents by workspace directory, matched with longest-prefix; explicit caller choices win."
+    "description": "Assign provider, model and reasoning effort to subagents by workspace directory, and switch them per session from the conversation's right sidebar."
   }
 }

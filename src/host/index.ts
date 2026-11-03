@@ -1,19 +1,24 @@
 /**
- * 工作区级子智能体路由：按父会话的当前工作目录，为子代理注入 provider / model / 思考等级。
+ * 子智能体路由：按父会话的当前工作目录，为子代理注入 provider / model / 思考等级。
  *
  * 所有创建子代理的入口（subagent、subagent_fork、workflow、agent-team、
  * 具名子代理库）最终都调用 `ctx.subagents.startActivation`，因此只需在这一处
  * 介入，就能统一覆盖全部派活路径，而不用改 DSH 本体的任何一个包。
  *
- * 优先级：调用方显式指定 > 工作区路由 > 父会话继承。
- * 合并后仍会经过 llm 的路由预检，非法路由在派活处直接失败，不会污染子会话。
+ * 优先级：调用方显式指定 > 当前会话覆盖 > 工作区路由 > 父会话继承。
+ * 会话覆盖来自右侧栏控制台，存放在独立的 JSON 文件里，只作用于该会话后续派出的子代理；
+ * 已在运行的子代理不受影响。合并后仍会经过 llm 的路由预检，非法路由在派活处直接失败，
+ * 不会污染子会话。
  */
 
 import { symbols, type Context } from '@deepseek-ai/cordis'
-import { isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Config, resolveConfig, type ResolvedConfig } from './config'
-import { loadRouteTable, matchRoute, RouteTableError, type RouteSpec, type RouteTable } from './routes'
-import { registerSettings } from './settings-api'
+import { loadRouteTable, matchRouteWithPath, RouteTableError, type RouteSpec, type RouteTable } from './routes'
+import { buildCatalogFromLlm, registerSettings, type LlmCatalogService } from './settings-api'
+import { OverrideStore } from './overrides'
+import { registerSessionApi, type SessionLookup } from './session-api'
+import { resolveEffective } from '../shared/overrides'
 
 export { Config }
 
@@ -40,6 +45,7 @@ interface AgentLike {
 }
 
 interface SessionLike {
+  readonly id?: string
   readonly header?: { readonly cwd?: string }
 }
 
@@ -69,40 +75,34 @@ interface LlmService {
   ): Promise<unknown>
 }
 
+/** 会话覆盖读取面；宿主每次派活都重读，保证控制台的修改立刻可见。 */
+export interface OverrideSource {
+  get(sessionId: string): RouteSpec | undefined
+}
+
 /**
  * 计算需要注入的路由字段。
  *
  * 返回 undefined 表示应当完全让位、不做任何改写：
- * - 调用方已经点名 provider+model（显式选择优先，连工作区的思考等级也不追加，
- *   因为那是给工作区模型配的等级，套到另一个模型上可能不被支持）；
- * - 路由表没有匹配，或匹配到的字段调用方都已显式给过。
+ * - 调用方已经点名 provider/model；
+ * - 工作区路由与会话覆盖都没有匹配，或它们要补的字段调用方都已显式给过。
  */
 export function routeOverride(
   explicit: AgentOptionsLike | undefined,
   table: RouteTable,
   directory: string,
+  override?: RouteSpec,
 ): RouteSpec | undefined {
-  const route = matchRoute(table, directory)
-  if (route === undefined) return undefined
-
-  const hasExplicitRoute = explicit?.provider !== undefined || explicit?.model !== undefined
-  if (hasExplicitRoute) return undefined
-
-  const provider = route.provider
-  const model = route.model
-  const reasoningEffort = explicit?.reasoningEffort !== undefined ? undefined : route.reasoningEffort
-
-  if (provider === undefined && model === undefined && reasoningEffort === undefined) return undefined
-  return {
-    ...(provider === undefined ? {} : { provider }),
-    ...(model === undefined ? {} : { model }),
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-  }
+  return resolveEffective({
+    explicit: explicit as RouteSpec | undefined,
+    override,
+    workspace: matchRouteWithPath(table, directory),
+  })?.spec
 }
 
 /**
  * current 来自派活请求，属于调用方显式选项，而不是父会话继承值。
- * routeOverride 已让位显式字段；父会话等级是否继承由 DSH 在后续解析时决定。
+ * resolveEffective 已让位显式字段；父会话等级是否继承由 DSH 在后续解析时决定。
  */
 export function mergeAgentOptions(current: AgentOptionsLike | undefined, override: RouteSpec): AgentOptionsLike {
   return { ...current, ...override }
@@ -122,10 +122,73 @@ export function resolveDirectory(
   return explicit === undefined ? current : resolve(current, explicit)
 }
 
-export function apply(ctx: Context, rawConfig?: unknown): void {
+/** 读取父会话 id；会话没有 id 时返回 undefined，覆盖层随之失效。 */
+export function resolveSessionId(request: ActivationRequest): string | undefined {
+  const id = request.parent?.session?.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+export interface ApplyOptions {
+  /** 会话覆盖读取面；缺省时由插件自建（指向 DSH_HOME 下的固定文件）。 */
+  overrides?: OverrideSource
+  /** 覆盖文件路径；仅测试与自定义部署使用。 */
+  overridesFile?: string
+}
+
+/**
+ * 默认覆盖文件位置：与路由表同目录，避免把一个插件的状态散到两处。
+ */
+function defaultOverridesFile(routesFile: string): string {
+  return join(dirname(routesFile), 'subagent-routes.overrides.json')
+}
+
+/** sessions 服务的最小接口：按 id 取会话，再读它的当前工作目录。 */
+interface SessionsService {
+  get(id: string): SessionLike | undefined
+}
+
+/**
+ * 把宿主服务封装成会话目录查询面。
+ *
+ * 目录优先取 workingDirectory 投影（含 `cd` 之后的当前位置），回落到会话头——
+ * 与派活路径上的 resolveDirectory 保持同一口径，否则控制台显示的目录
+ * 会和实际派活时用的目录不是同一个。
+ */
+function createLookup(ctx: Context): SessionLookup | undefined {
+  const sessions = ctx.get('sessions') as SessionsService | undefined
+  if (sessions === undefined || typeof sessions.get !== 'function') return undefined
+  return {
+    directory(sessionId: string): string | undefined {
+      const session = sessions.get(sessionId)
+      if (session === undefined) return undefined
+      const workingDirectory = ctx.get('workingDirectory') as WorkingDirectoryService | undefined
+      return workingDirectory?.get(session) ?? session.header?.cwd
+    },
+  }
+}
+
+export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions = {}): void {
+  const config: ResolvedConfig = resolveConfig(rawConfig)
+  const overridesFile = options.overridesFile ?? defaultOverridesFile(config.routesFile)
+  const store = new OverrideStore(overridesFile)
+  const overrides: OverrideSource = options.overrides ?? store
+
   // 路由关闭时也保留设置入口，以便从插件面板重新启用。
   registerSettings(ctx, rawConfig)
-  const config: ResolvedConfig = resolveConfig(rawConfig)
+
+  // 会话面板与控制台 API 始终注册：即使总开关关闭，用户也要能从面板看出「为什么没生效」。
+  // lookup 每次查询时现取服务，而不是在此刻定死：apply 与 sessions 的加载顺序由宿主决定，
+  // 在 apply 时取不到就永久丢掉会话目录，面板会一直显示「读不到目录」。
+  registerSessionApi(ctx, rawConfig, {
+    store,
+    lookup: {
+      directory(sessionId: string): string | undefined {
+        return createLookup(ctx)?.directory(sessionId)
+      },
+    },
+    getCatalog: () => buildCatalogFromLlm(ctx.get('llm') as LlmCatalogService | undefined),
+  })
+
   if (!config.enabled) return
 
   const logger = ctx.logger
@@ -154,17 +217,28 @@ export function apply(ctx: Context, rawConfig?: unknown): void {
 
     const routeSpec = async (spec: ActivationSpec): Promise<ActivationSpec> => {
       if (spec === null || typeof spec !== 'object' || spec.request === null) return spec
-      const table = readTable()
-      if (table === undefined) return spec
 
       const workingDirectory = injected.get('workingDirectory') as WorkingDirectoryService | undefined
       const directory = resolveDirectory(spec.request, workingDirectory)
-      if (directory === undefined) return spec
+      const sessionId = resolveSessionId(spec.request)
 
-      const override = routeOverride(spec.request.agentOptions, table, directory)
-      if (override === undefined) return spec
+      // 会话覆盖独立于路由表：即使路由表读不出来，控制台的选择也应该继续生效。
+      const override = sessionId === undefined ? undefined : overrides.get(sessionId)
 
-      const agentOptions = mergeAgentOptions(spec.request.agentOptions, override)
+      const table = readTable()
+      // 拿不到目录时仍可应用会话覆盖：那是按会话而非目录定位的。
+      const workspace = table === undefined || directory === undefined
+        ? undefined
+        : matchRouteWithPath(table, directory)
+
+      const effective = resolveEffective({
+        explicit: spec.request.agentOptions as RouteSpec | undefined,
+        override,
+        ...(workspace === undefined ? {} : { workspace }),
+      })
+      if (effective === undefined) return spec
+
+      const agentOptions = mergeAgentOptions(spec.request.agentOptions, effective.spec)
       if (config.preflight && agentOptions.provider !== undefined && agentOptions.model !== undefined) {
         const llm = injected.get('llm') as LlmService | undefined
         if (llm !== undefined) {
@@ -180,8 +254,9 @@ export function apply(ctx: Context, rawConfig?: unknown): void {
         }
       }
 
+      const source = effective.source === 'session' ? '会话覆盖' : effective.workspacePath ?? '全局默认'
       logger.info(
-        `subagent-routes: ${directory} → ${agentOptions.provider ?? '(继承)'}/${agentOptions.model ?? '(继承)'}` +
+        `subagent-routes: ${source} → ${agentOptions.provider ?? '(继承)'}/${agentOptions.model ?? '(继承)'}` +
           `${agentOptions.reasoningEffort === undefined ? '' : ` @${agentOptions.reasoningEffort}`}`,
       )
       return { ...spec, request: { ...spec.request, agentOptions } }

@@ -1,26 +1,101 @@
 import { createElement as h } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply } from '../../src/client/index'
+import { apply, inject } from '../../src/client/index'
 import { SettingsPanel } from '../../src/client/settings-panel'
 import { settingsApi } from '../../src/client/services'
 import { PACKAGE_NAME, PLUGIN_ID, SETTINGS_PATH } from '../../src/shared/settings'
 
 afterEach(() => vi.unstubAllGlobals())
 
+/**
+ * 一个最小但完整的客户端宿主桩。
+ *
+ * 动态插件只能访问 inject 里声明的服务，缺一项就会在 apply 里抛错——
+ * 所以桩必须把四项都提供出来，否则测的就不是真实运行形态。
+ */
+function host(overrides: Record<string, unknown> = {}) {
+  const entries: Array<Record<string, unknown>> = []
+  const renders: unknown[] = []
+  const definitions: Array<Record<string, unknown>> = []
+  return {
+    entries,
+    renders,
+    definitions,
+    ctx: {
+      slots: {
+        inject: (_name: string, factory: () => unknown) => factory(),
+        register: (meta: Record<string, unknown>, component: (props: never) => unknown) => {
+          entries.push(meta)
+          renders.push(component)
+          return () => undefined
+        },
+      },
+      sidebarRightTabs: {
+        register: (definition: Record<string, unknown>) => {
+          definitions.push(definition)
+          return () => undefined
+        },
+      },
+      sidebarRight: {
+        openTab: () => undefined,
+        isExpanded: () => false,
+        toggleExpanded: () => undefined,
+      },
+      locale: {
+        register: () => undefined,
+        bind: () => (key: string) => key,
+      },
+      effect: (factory: () => () => void) => { factory() },
+      ...overrides,
+    } as never,
+  }
+}
+
 describe('设置界面接入', () => {
   it('包级与 patch row 级使用同一个配置组件，并使用准确 key', () => {
-    const entries: Array<{ name: string; key: string }> = []
-    const renders: unknown[] = []
-    apply({ slots: {
-      inject: (_name, factory) => factory(),
-      register: (meta, component) => { entries.push(meta); renders.push(component) },
-    } })
-    expect(entries).toEqual([
+    const { ctx, entries, renders } = host()
+    apply(ctx)
+    // 前两个是既有设置入口；其后是右侧栏正文/标题与输入区药丸。
+    expect(entries.slice(0, 2)).toEqual([
       { name: 'plugins.bundle.config', key: PACKAGE_NAME },
       { name: 'plugins.row.config', key: `${PACKAGE_NAME}#${PLUGIN_ID}` },
     ])
-    expect(renders).toEqual([SettingsPanel, SettingsPanel])
+    expect(renders.slice(0, 2)).toEqual([SettingsPanel, SettingsPanel])
+  })
+
+  it('注册右侧栏正文、标题与输入区药丸三个 seat', () => {
+    const { ctx, entries } = host()
+    apply(ctx)
+    const names = entries.map(entry => entry.name)
+    expect(names).toContain('sidebar.right.pane.tab')
+    expect(names).toContain('sidebar.right.pane.tab.title')
+    expect(names).toContain('conversation.input.left')
+  })
+
+  it('把侧栏 tab 类型注册为可打开的页类型', () => {
+    const { ctx, definitions } = host()
+    apply(ctx)
+    expect(definitions).toHaveLength(1)
+    expect(definitions[0]).toMatchObject({ kind: 'subagentroute', priority: 'extension' })
+  })
+
+  it('inject 声明了侧栏与本地化服务，否则守卫会拒绝访问', () => {
+    // 动态客户端插件只能访问 inject 里声明过的服务；漏声明不会返回 undefined，
+    // 而是直接抛错，表现为界面上「什么都没有」。
+    expect(inject).toContain('slots')
+    expect(inject).toContain('sidebarRightTabs')
+    expect(inject).toContain('sidebarRight')
+    expect(inject).toContain('locale')
+  })
+
+  it('缺 sidebarRightTabs 时报错并留下日志，而不是静默少一块', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { ctx } = host({ sidebarRightTabs: undefined })
+    // 报错必须点名是哪个入口与哪个服务，否则只会在控制台留一条裸 TypeError。
+    expect(() => apply(ctx)).toThrow(/sidebar-tab-type|sidebarRightTabs/)
+    expect(errors).toHaveBeenCalled()
+    errors.mockRestore()
   })
 
   it('summary 不渲染编辑器、不发请求', () => {

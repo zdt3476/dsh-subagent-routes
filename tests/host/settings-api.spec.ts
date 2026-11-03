@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettingsHandler, registerSettings } from '../../src/host/settings-api'
 import { apply } from '../../src/host/index'
-import { PACKAGE_NAME, PLUGIN_ID, SETTINGS_PATH } from '../../src/shared/settings'
+import { PACKAGE_NAME, PLUGIN_ID, SESSION_PATH, SETTINGS_PATH } from '../../src/shared/settings'
 
 let directory: string
 let file: string
@@ -150,7 +150,10 @@ describe('设置 API', () => {
       inject: (_names: string[], callback: (context: unknown) => void) => callback(ctx),
     }
     apply(ctx as never, { routesFile: file, enabled: false })
-    expect(register).toHaveBeenCalledOnce()
+    // 两条接口都常驻：设置页用于重新启用，会话面板用于解释「为什么没生效」。
+    expect(register).toHaveBeenCalledTimes(2)
+    expect(register.mock.calls.map(([route]) => (route as { path: string }).path).sort())
+      .toEqual([SESSION_PATH, SETTINGS_PATH].sort())
     expect(get).not.toHaveBeenCalledWith('subagents')
   })
 
