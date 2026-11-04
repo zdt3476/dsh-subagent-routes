@@ -5,18 +5,20 @@ import type { CatalogModel, CatalogProviderGroup } from '../shared/settings'
  *
  * 不同厂商可能存在同名模型（例如 `gpt-4o` 同时挂在原生通道与自建代理上），
  * 只用模型 id 做 value 会让两者互相覆盖，选中的实际厂商也就无从回填。
- * 分隔符取不可打印字符，杜绝与正常 id 冲突。
+ * JSON 元组避免分隔符碰撞，也避免构建产物包含物理 NUL 字节。
  */
-const MODEL_KEY_SEPARATOR = '\u0000'
-
 export function encodeModelKey(provider: string, model: string): string {
-  return `${provider}${MODEL_KEY_SEPARATOR}${model}`
+  return JSON.stringify([provider, model])
 }
 
 export function decodeModelKey(key: string): { provider: string; model: string } | undefined {
-  const at = key.indexOf(MODEL_KEY_SEPARATOR)
-  if (at < 0) return undefined
-  return { provider: key.slice(0, at), model: key.slice(at + MODEL_KEY_SEPARATOR.length) }
+  try {
+    const tuple: unknown = JSON.parse(key)
+    if (!Array.isArray(tuple) || tuple.length !== 2 || tuple.some(value => typeof value !== 'string')) return undefined
+    return { provider: tuple[0], model: tuple[1] }
+  } catch {
+    return undefined
+  }
 }
 
 /** 在整份目录里定位模型；未选厂商时也要据此解析思考等级元数据。 */

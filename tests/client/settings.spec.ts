@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../../src/client/index'
 import { SettingsPanel } from '../../src/client/settings-panel'
-import { settingsApi } from '../../src/client/services'
+import { sessionApi, settingsApi } from '../../src/client/services'
 import { PACKAGE_NAME, PLUGIN_ID, SETTINGS_PATH } from '../../src/shared/settings'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -64,13 +64,24 @@ describe('设置界面接入', () => {
     expect(renders.slice(0, 2)).toEqual([SettingsPanel, SettingsPanel])
   })
 
-  it('注册右侧栏正文、标题与输入区药丸三个 seat', () => {
+  it('注册右侧栏正文、标题、输入区药丸与就地浮层四个 seat', () => {
     const { ctx, entries } = host()
     apply(ctx)
     const names = entries.map(entry => entry.name)
     expect(names).toContain('sidebar.right.pane.tab')
     expect(names).toContain('sidebar.right.pane.tab.title')
-    expect(names).toContain('conversation.input.left')
+    expect(names).toContain('conversation.input.right')
+    expect(names).toContain('conversation.input.overlay')
+  })
+
+  it('会话 seat 返回 React 元素而非直接调用带 hooks 的组件', () => {
+    const { ctx, entries, renders } = host()
+    apply(ctx)
+    for (const name of ['sidebar.right.pane.tab', 'conversation.input.right', 'conversation.input.overlay']) {
+      const render = renders[entries.findIndex(entry => entry.name === name)] as (props: { sessionId?: string }) => unknown
+      expect(render({})).toBeNull()
+      expect(render({ sessionId: 's1' })).toMatchObject({ props: { sessionId: 's1' } })
+    }
   })
 
   it('把侧栏 tab 类型注册为可打开的页类型', () => {
@@ -115,6 +126,28 @@ describe('设置界面接入', () => {
 })
 
 describe('设置请求', () => {
+  it('所有成功写入通知状态订阅者，失败及取消订阅后不通知', async () => {
+    const changed = vi.fn()
+    const unsubscribe = sessionApi.subscribe!(changed)
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ sessionId: 's1' })))
+      await sessionApi.save('s1', { mode: 'follow' })
+      await sessionApi.freeze('s1')
+      await settingsApi.saveTable({ text: '', revision: 'v1' })
+      await settingsApi.saveConfig({ routesFile: '', enabled: true, preflight: true, fallbackPolicy: 'rules' }, 'v1')
+      expect(changed).toHaveBeenCalledTimes(4)
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: '冲突' }, { status: 409 })))
+      await expect(sessionApi.save('s1', { mode: 'follow' })).rejects.toThrow('冲突')
+      expect(changed).toHaveBeenCalledTimes(4)
+      unsubscribe()
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ sessionId: 's1' })))
+      await sessionApi.save('s1', { mode: 'follow' })
+      expect(changed).toHaveBeenCalledTimes(4)
+    } finally {
+      unsubscribe()
+    }
+  })
+
   it('同源读取，不缓存配置', async () => {
     const fetch = vi.fn(async () => Response.json({ table: null }))
     vi.stubGlobal('fetch', fetch)
@@ -134,7 +167,7 @@ describe('设置请求', () => {
 
   it('基础配置保存失败时呈现真实错误，不报成功', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: '配置已被修改' }, { status: 409 })))
-    await expect(settingsApi.saveConfig({ routesFile: '', enabled: true, preflight: true }, 'v1')).rejects.toThrow('配置已被修改')
+    await expect(settingsApi.saveConfig({ routesFile: '', enabled: true, preflight: true, fallbackPolicy: 'rules' }, 'v1')).rejects.toThrow('配置已被修改')
   })
 
   it('非 JSON 的宿主错误有可诊断提示', async () => {
@@ -178,7 +211,7 @@ describe('新版设置页面渲染', () => {
 
     const customApi = {
       load: vi.fn(async () => ({
-        config: { routesFile: '', enabled: true, preflight: true },
+        config: { routesFile: '', enabled: true, preflight: true, fallbackPolicy: 'rules' as const },
         configRevision: 'rev1',
         canEditConfig: true,
         table: { file: '/path/routes.yaml', exists: true, text: 'routes: []\n', revision: 'rev2' },
@@ -192,5 +225,11 @@ describe('新版设置页面渲染', () => {
     const snapshot = await customApi.load()
     expect(snapshot.catalog).toEqual(mockCatalog)
     expect(snapshot.catalog[0]?.models[0]?.reasoning?.efforts).toHaveLength(2)
+  })
+
+  it('默认策略卡片包含继承主代理与路由规则两个选项', () => {
+    // 验证默认策略二选一卡片与描述文案
+    const html = renderToStaticMarkup(h(SettingsPanel, {}))
+    expect(html).toContain('正在读取设置')
   })
 })

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Subagent workspace routes",
-    "description": "Assign provider, model and reasoning effort to subagents by workspace directory, and switch them per session from the conversation's right sidebar."
+    "description": "Assign provider, model and reasoning effort to subagents by workspace directory. Choose globally whether subagents inherit the parent model or use the generic subagent route, and override it per session right in the composer."
   }
 }

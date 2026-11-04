@@ -189,6 +189,58 @@ export const SETTINGS_CSS = `
 }
 .sr-card-desc { font-size: 12px; color: var(--sr-muted); margin: 0 0 12px; }
 
+/* 全局默认策略二选一选项 */
+.sr-policy-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+@media (max-width: 640px) {
+  .sr-policy-options { grid-template-columns: minmax(0, 1fr); }
+}
+.sr-policy-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid var(--sr-control-line);
+  border-radius: 6px;
+  background: var(--sr-surface);
+  color: var(--sr-text);
+  cursor: pointer;
+  font: inherit;
+  transition: all 0.15s ease;
+}
+.sr-policy-option:hover:not(:disabled) {
+  background: var(--sr-surface-subtle);
+  border-color: var(--sr-accent);
+}
+.sr-policy-option[aria-checked='true'] {
+  border-color: var(--sr-accent);
+  background: var(--sr-accent-subtle);
+  box-shadow: inset 0 0 0 1px var(--sr-accent);
+}
+.sr-policy-option:focus-visible {
+  outline: 2px solid var(--sr-accent);
+  outline-offset: 2px;
+}
+.sr-policy-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.sr-policy-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sr-text);
+}
+.sr-policy-desc {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--sr-muted);
+}
+
 /* 兜底网格表单 */
 .sr-form-grid {
   display: grid;

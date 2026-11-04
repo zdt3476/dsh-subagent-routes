@@ -29,9 +29,14 @@ const TABLE = [
   '    reasoningEffort: max',
 ].join('\n')
 
-function handler(options: { directory?: string; enabled?: boolean } = {}) {
+function handler(options: { directory?: string; enabled?: boolean; fallbackPolicy?: 'inherit' | 'rules' } = {}) {
   writeFileSync(routesFile, TABLE)
-  const rawConfig = { routesFile, enabled: options.enabled ?? true, preflight: true }
+  const rawConfig = {
+    routesFile,
+    enabled: options.enabled ?? true,
+    preflight: true,
+    ...(options.fallbackPolicy === undefined ? {} : { fallbackPolicy: options.fallbackPolicy }),
+  }
   const warn = vi.fn()
   return {
     warn,
@@ -69,23 +74,25 @@ describe('会话快照', () => {
       tableAvailable: true,
       enabled: true,
     })
-    expect(body.override).toBeUndefined()
+    expect(body.session).toBeUndefined()
+    expect(body.mode).toBe('follow')
   })
 
   it('有覆盖时报告 session 来源', async () => {
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const h = handler({ directory: '/work/frontend/src' })
     const body = await (await get(h)).json()
 
     expect(body.effective).toEqual({ source: 'session', spec: { provider: 'sess-p', model: 'sess-m' } })
-    expect(body.override).toEqual({ provider: 'sess-p', model: 'sess-m' })
+    expect(body.session).toEqual({ mode: 'custom', provider: 'sess-p', model: 'sess-m' })
+    expect(body.mode).toBe('custom')
   })
 
   it('路由表损坏时报告 tableAvailable: false，且覆盖仍显示为生效', async () => {
     const h = handler({ directory: '/work/frontend/src' })
     // handler() 会写入一张好表；损坏必须在它之后发生。
     writeFileSync(routesFile, 'routes: [')
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const body = await (await get(h)).json()
 
     expect(body.tableAvailable).toBe(false)
@@ -94,7 +101,7 @@ describe('会话快照', () => {
   })
 
   it('拿不到目录时不报错，覆盖仍可用', async () => {
-    store.set('s1', { reasoningEffort: 'low' })
+    store.set('s1', { mode: 'custom', reasoningEffort: 'low' })
     const h = handler()
     const body = await (await get(h)).json()
 
@@ -127,37 +134,39 @@ describe('会话快照', () => {
   })
 })
 
-describe('保存覆盖', () => {
+describe('保存会话选择', () => {
   it('保存后落盘并立即在快照里生效', async () => {
     const h = handler({ directory: '/work/frontend/src' })
     const body = await (await put(h, {
       action: 'save',
       sessionId: 's1',
+      mode: 'custom',
       override: { provider: ' new-p ', model: 'new-m', reasoningEffort: 'low' },
     })).json()
 
-    expect(body.override).toEqual({ provider: 'new-p', model: 'new-m', reasoningEffort: 'low' })
-    expect(store.get('s1')).toEqual({ provider: 'new-p', model: 'new-m', reasoningEffort: 'low' })
+    expect(body.session).toEqual({ mode: 'custom', provider: 'new-p', model: 'new-m', reasoningEffort: 'low' })
+    expect(store.get('s1')).toEqual({ mode: 'custom', provider: 'new-p', model: 'new-m', reasoningEffort: 'low' })
   })
 
-  it('override 为 null 表示清除', async () => {
-    store.set('s1', { provider: 'p', model: 'm' })
+  it('mode=follow 表示清除', async () => {
+    store.set('s1', { mode: 'custom', provider: 'p', model: 'm' })
     const h = handler({ directory: '/work/frontend/src' })
-    const body = await (await put(h, { action: 'save', sessionId: 's1', override: null })).json()
+    const body = await (await put(h, { action: 'save', sessionId: 's1', mode: 'follow', override: null })).json()
 
-    expect(body.override).toBeUndefined()
+    expect(body.session).toBeUndefined()
+    expect(body.mode).toBe('follow')
     expect(store.get('s1')).toBeUndefined()
   })
 
-  it('override 字段缺失时报错，不误当清除', async () => {
+  it('mode=custom 缺 override 时报错，不误当清除', async () => {
     const h = handler()
-    const response = await put(h, { action: 'save', sessionId: 's1' })
+    const response = await put(h, { action: 'save', sessionId: 's1', mode: 'custom' })
     expect(response.status).toBe(400)
   })
 
   it('半套 provider/model 被拒绝', async () => {
     const h = handler()
-    const response = await put(h, { action: 'save', sessionId: 's1', override: { provider: 'p' } })
+    const response = await put(h, { action: 'save', sessionId: 's1', mode: 'custom', override: { provider: 'p' } })
     expect(response.status).toBe(400)
     expect(store.get('s1')).toBeUndefined()
   })
@@ -179,11 +188,12 @@ describe('保存覆盖', () => {
 
 describe('固化为项目规则', () => {
   it('写入路由表并清除会话覆盖', async () => {
-    store.set('s1', { provider: 'sess-p', model: 'sess-m', reasoningEffort: 'high' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m', reasoningEffort: 'high' })
     const h = handler({ directory: '/work/frontend/src' })
     const body = await (await put(h, { action: 'freeze', sessionId: 's1' })).json()
 
-    expect(body.override).toBeUndefined()
+    expect(body.session).toBeUndefined()
+    expect(body.mode).toBe('follow')
     expect(store.get('s1')).toBeUndefined()
 
     const text = readFileSync(routesFile, 'utf8')
@@ -194,7 +204,7 @@ describe('固化为项目规则', () => {
   })
 
   it('保留路由表原有的全局兜底与其他规则', async () => {
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const h = handler({ directory: '/work/frontend/src' })
     await put(h, { action: 'freeze', sessionId: 's1' })
 
@@ -205,10 +215,10 @@ describe('固化为项目规则', () => {
   })
 
   it('同一目录再次固化时替换而不是追加', async () => {
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const h = handler({ directory: '/work/frontend' })
     await put(h, { action: 'freeze', sessionId: 's1' })
-    store.set('s1', { provider: 'p2', model: 'm2' })
+    store.set('s1', { mode: 'custom', provider: 'p2', model: 'm2' })
     await put(h, { action: 'freeze', sessionId: 's1' })
 
     const text = readFileSync(routesFile, 'utf8')
@@ -226,7 +236,7 @@ describe('固化为项目规则', () => {
   it('路由表无法解析时拒绝固化，不覆盖用户已有内容', async () => {
     const h = handler({ directory: '/work/frontend/src' })
     writeFileSync(routesFile, 'routes: [')
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const response = await put(h, { action: 'freeze', sessionId: 's1' })
 
     expect(response.status).toBe(400)
@@ -235,7 +245,7 @@ describe('固化为项目规则', () => {
   })
 
   it('可以用请求里的 path 指定目标目录', async () => {
-    store.set('s1', { provider: 'sess-p', model: 'sess-m' })
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const h = handler({ directory: '/work/frontend/src' })
     await put(h, { action: 'freeze', sessionId: 's1', path: '/work/frontend' })
 
@@ -255,5 +265,87 @@ describe('buildSessionSnapshot', () => {
       warn: vi.fn(),
     })
     expect(snapshot.effective).toMatchObject({ source: 'fallback' })
+  })
+})
+
+describe('全局默认策略', () => {
+  it('缺省时按规则走，快照带出策略字段', async () => {
+    const h = handler({ directory: '/work/frontend/src' })
+    const body = await (await get(h)).json()
+    expect(body.defaultPolicy).toBe('rules')
+    expect(body.effective).toMatchObject({ source: 'workspace' })
+  })
+
+  it('策略为继承时不再报告注定不生效的规则命中', async () => {
+    const h = handler({ directory: '/work/frontend/src', fallbackPolicy: 'inherit' })
+    const body = await (await get(h)).json()
+
+    expect(body.defaultPolicy).toBe('inherit')
+    expect(body.workspace).toBeUndefined()
+    expect(body.effective).toBeUndefined()
+  })
+
+  it('策略为继承时，会话显式指定仍然报告为生效', async () => {
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
+    const h = handler({ directory: '/work/frontend/src', fallbackPolicy: 'inherit' })
+    const body = await (await get(h)).json()
+
+    expect(body.effective).toEqual({ source: 'session', spec: { provider: 'sess-p', model: 'sess-m' } })
+  })
+
+  it('会话选择继承时报告 mode=inherit 且没有生效路由', async () => {
+    store.set('s1', { mode: 'inherit' })
+    const h = handler({ directory: '/work/frontend/src' })
+    const body = await (await get(h)).json()
+
+    expect(body.mode).toBe('inherit')
+    expect(body.session).toEqual({ mode: 'inherit' })
+    expect(body.effective).toBeUndefined()
+  })
+
+  it('保存 inherit 后立即生效，并清除原有的指定值', async () => {
+    store.set('s1', { mode: 'custom', provider: 'p', model: 'm' })
+    const h = handler({ directory: '/work/frontend/src' })
+    const body = await (await put(h, { action: 'save', sessionId: 's1', mode: 'inherit' })).json()
+
+    expect(body.mode).toBe('inherit')
+    expect(body.effective).toBeUndefined()
+    expect(store.get('s1')).toEqual({ mode: 'inherit' })
+  })
+
+  it('inherit 模式下带 override 被拒绝', async () => {
+    const h = handler()
+    const response = await put(h, {
+      action: 'save',
+      sessionId: 's1',
+      mode: 'inherit',
+      override: { provider: 'p', model: 'm' },
+    })
+    expect(response.status).toBe(400)
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it('未知 mode 被拒绝', async () => {
+    const h = handler()
+    const response = await put(h, { action: 'save', sessionId: 's1', mode: 'nope' })
+    expect(response.status).toBe(400)
+  })
+
+  it('mode=custom 但指定值全空时，等同于回到跟随全局策略', async () => {
+    store.set('s1', { mode: 'custom', provider: 'p', model: 'm' })
+    const h = handler({ directory: '/work/frontend/src' })
+    const body = await (await put(h, { action: 'save', sessionId: 's1', mode: 'custom', override: {} })).json()
+
+    expect(body.mode).toBe('follow')
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it('继承记录不能固化为项目规则（没有可写的路由）', async () => {
+    store.set('s1', { mode: 'inherit' })
+    const h = handler({ directory: '/work/frontend/src' })
+    const response = await put(h, { action: 'freeze', sessionId: 's1' })
+
+    expect(response.status).toBe(400)
+    expect(store.get('s1')).toEqual({ mode: 'inherit' })
   })
 })

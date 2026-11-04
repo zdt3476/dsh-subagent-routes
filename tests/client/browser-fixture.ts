@@ -25,10 +25,14 @@ const logs: string[] = []
 
 let sidebarExpanded = false
 
-/** 侧栏 tab 正文的 key，与 src/client/index.ts 保持一致。 */
-const TAB_KEY = `${PACKAGE_NAME}/route`
+/** 侧栏 tab 正文的槽位与 key，与 src/client/index.ts 保持一致。 */
+const SETTINGS_SLOT = 'plugins.bundle.config'
+const TAB_SLOT = 'sidebar.right.pane.tab'
+const TAB_KEY = `${TAB_SLOT}#${PACKAGE_NAME}/route`
 /** 输入区药丸的 key。 */
-const CHIP_KEY = `${PACKAGE_NAME}-chip`
+const CHIP_KEY = `conversation.input.right#${PACKAGE_NAME}-chip`
+/** 输入区浮层的 key。 */
+const OVERLAY_KEY = `conversation.input.overlay#${PACKAGE_NAME}-overlay`
 
 const stubs = {
   sidebarRightTabs: {
@@ -71,7 +75,13 @@ Object.assign(globalThis, {
         slots: {
           inject: (_name: string, factory: () => unknown) => factory(),
           register: (meta: Record<string, unknown>, component: (props: never) => unknown) => {
-            const key = String(meta.key ?? meta.id ?? meta.name)
+            /*
+             * 用「槽位名 + key」做标识，而不是只用 key。
+             * 真实宿主按槽位分开存放，而侧栏 tab 的正文与标题用的是同一个 key，
+             * 只用 key 会让后注册的标题函数覆盖正文组件，夹具里就看不到面板了。
+             */
+            const slot = String(meta.name)
+            const key = `${slot}#${String(meta.key ?? meta.id ?? '')}`
             components.set(key, { Component: component as React.ComponentType<never>, meta })
             return () => components.delete(key)
           },
@@ -90,11 +100,14 @@ Object.assign(globalThis, {
     sidebarExpanded = false
   },
 
-  __SR_MOUNT_SETTINGS__: (targetId = 'mount') => mount(PACKAGE_NAME, targetId, { view: 'page' }),
+  __SR_MOUNT_SETTINGS__: (targetId = 'mount') =>
+    mount(`${SETTINGS_SLOT}#${PACKAGE_NAME}`, targetId, { view: 'page' }),
   __SR_MOUNT_PANEL__: (targetId = 'mount', props: Record<string, unknown> = {}) =>
     mount(TAB_KEY, targetId, { sessionId: 'session-demo', ...props }),
   __SR_MOUNT_CHIP__: (targetId = 'mount', props: Record<string, unknown> = {}) =>
     mount(CHIP_KEY, targetId, { sessionId: 'session-demo', ...props }),
+  __SR_MOUNT_OVERLAY__: (targetId = 'mount', props: Record<string, unknown> = {}) =>
+    mount(OVERLAY_KEY, targetId, { sessionId: 'session-demo', ...props }),
 
   __SR_TABS__: () => tabDefinitions,
   __SR_OPENED__: () => opened,

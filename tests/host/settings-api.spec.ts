@@ -51,11 +51,30 @@ describe('设置 API', () => {
     const h = harness()
     Object.assign(h.entry.options.config, { other: 'retained' })
     const state = await (await h.request()).json()
-    const config = { routesFile: file, enabled: false, preflight: false }
+    const config = { routesFile: file, enabled: false, preflight: false, fallbackPolicy: 'inherit' }
     const response = await h.request('PUT', { kind: 'config', config, revision: state.configRevision })
     expect(response.status).toBe(200)
     expect(h.editor.edit).toHaveBeenCalledOnce()
     expect(h.entry.options.config).toMatchObject({ ...config, other: 'retained' })
+  })
+
+  it('configEditor 晚于 connection 就绪时设置不会永久只读', async () => {
+    const h = harness()
+    let editor: typeof h.editor | undefined
+    const handler = createSettingsHandler(h.entry.options.config, () => editor, vi.fn())
+    const get = () => handler(new Request(`http://localhost${SETTINGS_PATH}`))
+    expect(await (await get()).json()).toMatchObject({ canEditConfig: false })
+    editor = h.editor
+    const state = await (await get()).json()
+    expect(state.canEditConfig).toBe(true)
+    const saved = await handler(new Request(`http://localhost${SETTINGS_PATH}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'config', config: { ...state.config, enabled: false }, revision: state.configRevision }),
+    }))
+    expect(saved.status).toBe(200)
+    expect(h.entry.options.config.enabled).toBe(false)
+    editor = undefined
+    expect(await (await get()).json()).toMatchObject({ canEditConfig: false })
   })
 
   it('配置并发变化时拒绝覆盖', async () => {

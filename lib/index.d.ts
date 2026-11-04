@@ -1,14 +1,34 @@
 
 import { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
+interface RouteSpec$1 {
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+/** 没有任何规则命中时的全局默认策略：继承主代理模型，还是照常查路由表。 */
+type RouteDefaultPolicy = 'inherit' | 'rules';
+/**
+ * 会话记录（持久化形态）：只有 inherit 与 custom 两种，follow 靠删除记录表达。
+ *
+ * 用带判别字段的联合而不是 `{mode, provider?}` 的松散对象，
+ * 是为了让「inherit 却带着 provider」这种自相矛盾的记录无法被构造出来。
+ */
+type SessionRecord = {
+  mode: 'inherit';
+} | ({
+  mode: 'custom';
+} & RouteSpec$1);
 export declare const Config: z<Schemastery.ObjectS<NoInfer<{
   routesFile: z<string, string, "defined">;
   enabled: z<boolean, boolean, "defined">;
   preflight: z<boolean, boolean, "defined">;
+  fallbackPolicy: z<"inherit" | "rules", "inherit" | "rules", "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
   routesFile: z<string, string, "defined">;
   enabled: z<boolean, boolean, "defined">;
   preflight: z<boolean, boolean, "defined">;
+  fallbackPolicy: z<"inherit" | "rules", "inherit" | "rules", "defined">;
 }>>, "plain">;
 /**
  * 工作区路由表的读取、校验与前缀匹配。
@@ -58,18 +78,19 @@ interface AgentOptionsLike {
 interface WorkingDirectoryService {
   get(session: SessionLike): string;
 }
-/** 会话覆盖读取面；宿主每次派活都重读，保证控制台的修改立刻可见。 */
+/** 会话选择读取面；宿主每次派活都重读，保证控制台的修改立刻可见。 */
 export interface OverrideSource {
-  get(sessionId: string): RouteSpec | undefined;
+  get(sessionId: string): SessionRecord | undefined;
 }
 /**
  * 计算需要注入的路由字段。
  *
  * 返回 undefined 表示应当完全让位、不做任何改写：
  * - 调用方已经点名 provider/model；
- * - 工作区路由与会话覆盖都没有匹配，或它们要补的字段调用方都已显式给过。
+ * - 会话选择了继承主代理模型，或全局策略要求继承；
+ * - 工作区路由与会话选择都没有匹配，或它们要补的字段调用方都已显式给过。
  */
-export declare function routeOverride(explicit: AgentOptionsLike | undefined, table: RouteTable, directory: string, override?: RouteSpec): RouteSpec | undefined;
+export declare function routeOverride(explicit: AgentOptionsLike | undefined, table: RouteTable, directory: string, session?: SessionRecord, defaultPolicy?: RouteDefaultPolicy): RouteSpec | undefined;
 /**
  * current 来自派活请求，属于调用方显式选项，而不是父会话继承值。
  * resolveEffective 已让位显式字段；父会话等级是否继承由 DSH 在后续解析时决定。

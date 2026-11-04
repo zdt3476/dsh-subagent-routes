@@ -1,11 +1,12 @@
-import type { EffectiveRoute } from './overrides'
+import type { EffectiveRoute, RouteDefaultPolicy, SessionMode, SessionRecord } from './overrides'
 import type { ParsedRouteTable, RouteSpec } from './yaml-utils'
+export type { EffectiveRoute, RouteDefaultPolicy, SessionMode, SessionRecord } from './overrides'
 export type { ParsedRouteTable, RouteSpec, WorkspaceRoute } from './yaml-utils'
 
 export const PACKAGE_NAME = '@zdt3476/dsh-subagent-routes'
 export const PLUGIN_ID = 'subagent-routes'
 export const SETTINGS_PATH = '/api/subagent-routes/settings'
-/** 会话级覆盖的读写路径；只接受 GET 与 PUT。 */
+/** 会话级选择的读写路径；只接受 GET 与 PUT。 */
 export const SESSION_PATH = '/api/subagent-routes/session'
 export const MAX_TABLE_BYTES = 256 * 1024
 
@@ -27,6 +28,8 @@ export interface PluginConfig {
   routesFile: string
   enabled: boolean
   preflight: boolean
+  /** 没有任何规则命中时是继承主代理模型，还是按路由表给通用子代理模型。 */
+  fallbackPolicy: RouteDefaultPolicy
 }
 
 export interface ModelReasoningEffort {
@@ -69,32 +72,38 @@ export interface SettingsSnapshot {
   workspaces?: WorkspaceEntry[]
 }
 
-/** 侧边栏控制台看到的会话状态。 */
+/** 控制台看到的会话状态。 */
 export interface SessionSnapshot {
   sessionId: string
-  /** 该会话当前生效的路由；undefined 表示继承父会话模型。 */
+  /** 该会话当前生效的路由；undefined 表示继承主代理模型。 */
   effective?: EffectiveRoute
-  /** 该会话的临时覆盖；undefined 表示跟随工作区规则。 */
-  override?: RouteSpec
-  /** 当前会话所在目录解析出的工作区规则；undefined 表示只剩全局兜底或没有规则。 */
+  /** 该会话的选择；undefined 表示跟随全局策略。 */
+  session?: SessionRecord
+  /** 该会话的选择被展开成界面需要的三态与草稿值。 */
+  mode: SessionMode
+  /** 当前会话所在目录解析出的工作区规则；undefined 表示没有命中，或全局策略是继承。 */
   workspace?: { spec: RouteSpec; path?: string }
-  /** 解析出的工作目录；拿不到时为 undefined，此时只有会话覆盖能生效。 */
+  /** 解析出的工作目录；拿不到时为 undefined，此时只有会话选择能生效。 */
   directory?: string
   /** 路由表是否可读；不可读时面板需要说明「工作区规则暂不可用」。 */
   tableAvailable: boolean
-  /** 插件总开关关闭时，覆盖与规则都不生效，面板据此禁用编辑。 */
+  /** 插件总开关关闭时，会话选择与规则都不生效，面板据此禁用编辑。 */
   enabled: boolean
+  /** 没有任何规则命中时的全局默认策略，控制台据此解释「为什么没走项目规则」。 */
+  defaultPolicy: RouteDefaultPolicy
   /** 宿主探测到的模型目录，供三级联动使用。 */
   catalog?: CatalogProviderGroup[]
 }
 
-/** 保存会话覆盖；`override` 为 null 表示清除并回到工作区规则。 */
-export interface SaveSessionOverride {
+/** 保存会话选择；}`mode: 'follow'` 表示清除并回到全局策略。 */
+export interface SaveSessionSelection {
   sessionId: string
-  override: RouteSpec | null
+  mode: SessionMode
+  /** 仅 mode === 'custom' 时有意义。 */
+  override?: RouteSpec | null
 }
 
-/** 把当前会话覆盖固化为工作区规则。 */
+/** 把当前会话指定固化为工作区规则。 */
 export interface FreezeSessionWorkspace {
   sessionId: string
   /** 目标目录；缺省用会话当前目录。 */
@@ -103,5 +112,5 @@ export interface FreezeSessionWorkspace {
 
 /** 会话接口接受的写操作：两种意图共用一个 PUT，靠 action 区分。 */
 export type SessionAction =
-  | ({ action: 'save' } & SaveSessionOverride)
+  | ({ action: 'save' } & SaveSessionSelection)
   | ({ action: 'freeze' } & FreezeSessionWorkspace)

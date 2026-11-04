@@ -25,6 +25,7 @@ describe('resolveConfig', () => {
       routesFile: '/home/tester/.dsh/subagent-routes.yaml',
       enabled: true,
       preflight: true,
+      fallbackPolicy: 'rules',
     })
   })
 
@@ -42,6 +43,18 @@ describe('resolveConfig', () => {
     ['~other/routes.yaml', '~other/routes.yaml'],
   ])('解析路径 %s', (routesFile, expected) => {
     expect(resolveConfig({ routesFile }).routesFile).toBe(expected)
+  })
+
+  it('默认策略缺省为按规则走，保持升级前的行为', () => {
+    expect(resolveConfig({}).fallbackPolicy).toBe('rules')
+  })
+
+  it('默认策略可显式设为继承', () => {
+    expect(resolveConfig({ fallbackPolicy: 'inherit' }).fallbackPolicy).toBe('inherit')
+  })
+
+  it('默认策略写了未知值时落回按规则走，而不是让派活路径静默走错策略', () => {
+    expect(resolveConfig({ fallbackPolicy: 'nope' }).fallbackPolicy).toBe('rules')
   })
 
   it('保留显式关闭的开关', () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { isEmptyRoute, isRoutePinned, normalizeOverride, resolveEffective } from '../../src/shared/overrides'
+import {
+  isEmptyRoute,
+  isRoutePinned,
+  normalizeOverride,
+  normalizeSessionRecord,
+  resolveEffective,
+} from '../../src/shared/overrides'
 
 describe('isRoutePinned', () => {
   it('provider 或 model 任一存在就算点名', () => {
@@ -28,6 +34,9 @@ describe('isEmptyRoute', () => {
   })
 })
 
+const custom = { mode: 'custom' as const }
+const inherit = { mode: 'inherit' as const }
+
 describe('resolveEffective', () => {
   const workspace = {
     spec: { provider: 'ws-provider', model: 'ws-model', reasoningEffort: 'max' },
@@ -38,11 +47,11 @@ describe('resolveEffective', () => {
     expect(resolveEffective({})).toBeUndefined()
   })
 
-  it('调用方点名模型时完全让位，即使会话有覆盖', () => {
+  it('调用方点名模型时完全让位，即使会话有指定', () => {
     expect(
       resolveEffective({
         explicit: { provider: 'caller-p', model: 'caller-m' },
-        override: { provider: 'sess-p', model: 'sess-m' },
+        session: { ...custom, provider: 'sess-p', model: 'sess-m' },
         workspace,
       }),
     ).toBeUndefined()
@@ -52,16 +61,16 @@ describe('resolveEffective', () => {
     expect(resolveEffective({ explicit: { provider: 'caller-p' }, workspace })).toBeUndefined()
   })
 
-  it('会话覆盖优先于工作区路由', () => {
+  it('会话指定优先于工作区路由', () => {
     expect(
       resolveEffective({
-        override: { provider: 'sess-p', model: 'sess-m', reasoningEffort: 'low' },
+        session: { ...custom, provider: 'sess-p', model: 'sess-m', reasoningEffort: 'low' },
         workspace,
       }),
     ).toEqual({ source: 'session', spec: { provider: 'sess-p', model: 'sess-m', reasoningEffort: 'low' } })
   })
 
-  it('没有会话覆盖时用工作区路由，并带上命中的目录前缀', () => {
+  it('没有会话指定时用工作区路由，并带上命中的目录前缀', () => {
     expect(resolveEffective({ workspace })).toEqual({
       source: 'workspace',
       spec: { provider: 'ws-provider', model: 'ws-model', reasoningEffort: 'max' },
@@ -76,11 +85,11 @@ describe('resolveEffective', () => {
     })
   })
 
-  it('调用方给了等级时，会话覆盖不覆盖该等级', () => {
+  it('调用方给了等级时，会话指定不覆盖该等级', () => {
     expect(
       resolveEffective({
         explicit: { reasoningEffort: 'medium' },
-        override: { provider: 'sess-p', model: 'sess-m', reasoningEffort: 'max' },
+        session: { ...custom, provider: 'sess-p', model: 'sess-m', reasoningEffort: 'max' },
         workspace,
       }),
     ).toEqual({ source: 'session', spec: { provider: 'sess-p', model: 'sess-m' } })
@@ -94,8 +103,8 @@ describe('resolveEffective', () => {
     })
   })
 
-  it('会话覆盖只设等级时，仍压过工作区的完整路由', () => {
-    expect(resolveEffective({ override: { reasoningEffort: 'low' }, workspace })).toEqual({
+  it('会话指定只设等级时，仍压过工作区的完整路由', () => {
+    expect(resolveEffective({ session: { ...custom, reasoningEffort: 'low' }, workspace })).toEqual({
       source: 'session',
       spec: { reasoningEffort: 'low' },
     })
@@ -105,17 +114,33 @@ describe('resolveEffective', () => {
     expect(resolveEffective({ explicit: { reasoningEffort: 'high' } })).toBeUndefined()
   })
 
-  it('会话覆盖为空对象时视作没有覆盖', () => {
-    expect(resolveEffective({ override: {}, workspace })).toMatchObject({ source: 'workspace' })
+  it('没有会话记录时视作跟随全局策略', () => {
+    expect(resolveEffective({ session: undefined, workspace })).toMatchObject({ source: 'workspace' })
   })
 
-  it('会话覆盖只补调用方缺的那部分字段', () => {
+  it('会话选择继承时直接让位，即使工作区有规则', () => {
+    expect(resolveEffective({ session: inherit, workspace })).toBeUndefined()
+  })
+
+  it('全局策略为继承时让位，连全局兜底也不注入', () => {
+    expect(resolveEffective({ workspace, defaultPolicy: 'inherit' })).toBeUndefined()
+    expect(
+      resolveEffective({ workspace: { spec: { provider: 'p', model: 'm' } }, defaultPolicy: 'inherit' }),
+    ).toBeUndefined()
+  })
+
+  it('全局策略为继承时，会话显式指定依然生效', () => {
     expect(
       resolveEffective({
-        explicit: { provider: 'caller-p', model: 'caller-m' },
-        override: { provider: 'sess-p', model: 'sess-m' },
+        session: { ...custom, provider: 'sess-p', model: 'sess-m' },
+        workspace,
+        defaultPolicy: 'inherit',
       }),
-    ).toBeUndefined()
+    ).toEqual({ source: 'session', spec: { provider: 'sess-p', model: 'sess-m' } })
+  })
+
+  it('全局策略默认仍是按规则走，保持升级前的行为', () => {
+    expect(resolveEffective({ workspace })).toMatchObject({ source: 'workspace' })
   })
 })
 
@@ -143,5 +168,45 @@ describe('normalizeOverride', () => {
 
   it('只给等级是合法的', () => {
     expect(normalizeOverride({ reasoningEffort: 'max' })).toEqual({ reasoningEffort: 'max' })
+  })
+})
+
+describe('normalizeSessionRecord', () => {
+  it('follow 一律得到「没有记录」，空 spec 也不报错', () => {
+    expect(normalizeSessionRecord('follow')).toBeUndefined()
+    expect(normalizeSessionRecord('follow', null)).toBeUndefined()
+  })
+
+  it('follow 带指定值时拒绝', () => {
+    expect(() => normalizeSessionRecord('follow', { provider: 'p', model: 'm' })).toThrow('跟随全局策略')
+  })
+
+  it('inherit 得到继承记录', () => {
+    expect(normalizeSessionRecord('inherit')).toEqual({ mode: 'inherit' })
+  })
+
+  it('inherit 带指定值时拒绝', () => {
+    expect(() => normalizeSessionRecord('inherit', { reasoningEffort: 'high' })).toThrow('继承主代理模型')
+  })
+
+  it('custom 规范化路由字段', () => {
+    expect(normalizeSessionRecord('custom', { provider: ' p ', model: ' m ' })).toEqual({
+      mode: 'custom',
+      provider: 'p',
+      model: 'm',
+    })
+  })
+
+  it('custom 全空视作清除，与 follow 等价', () => {
+    expect(normalizeSessionRecord('custom', {})).toBeUndefined()
+    expect(normalizeSessionRecord('custom', null)).toBeUndefined()
+  })
+
+  it('custom 半套路由被拒绝', () => {
+    expect(() => normalizeSessionRecord('custom', { model: 'm' })).toThrow('provider 与 model 必须同时提供')
+  })
+
+  it('未知模式被拒绝', () => {
+    expect(() => normalizeSessionRecord('nope' as never)).toThrow('未知的会话模式')
   })
 })

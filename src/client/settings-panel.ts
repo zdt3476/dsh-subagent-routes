@@ -394,12 +394,71 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     ),
   )
 
+  /*
+   * 策略选「继承」时，下方的兜底模型与项目规则都不会再生效。
+   * 若不在界面上说出来，用户会以为规则改了没反应——这是最容易踩的坑，
+   * 因此下方两张卡片统一挂上这行提示，而不是让它们默默失效。
+   */
+  const currentPolicy = config.fallbackPolicy ?? 'rules'
+  const policyInactive = currentPolicy === 'inherit'
+  /*
+   * 每张卡片各建一个元素，不复用同一个 React element：
+   * 同一实例出现在两处时 React 只会渲染其中之一，另一处的提示会静默消失。
+   */
+  const inactiveNote = (key: string) => h('p', {
+    key,
+    className: 'sr-hint is-warn',
+    style: { margin: '0 0 12px' },
+  }, '当前全局策略是「继承主代理模型」，下列配置已保存但暂不生效；切回「使用路由规则」即恢复。')
+
+  // 可视化编辑区：全局默认策略卡片
+  const policyCard = h('div', { className: 'sr-card' },
+    h('div', { className: 'sr-card-head' },
+      h('h4', { className: 'sr-card-title' }, '全局默认策略'),
+    ),
+    h('p', { className: 'sr-card-desc' },
+      '当会话未单独指定、且当前工作区目录未命中任何专属规则时，子代理的兜底行为。'),
+    h('div', { className: 'sr-policy-options', role: 'radiogroup', 'aria-label': '全局默认策略' },
+      h('button', {
+        type: 'button',
+        className: 'sr-policy-option',
+        role: 'radio',
+        'aria-checked': currentPolicy === 'inherit',
+        disabled: isBlocked || !snapshot.canEditConfig,
+        onClick: () => {
+          setConfig({ ...config, fallbackPolicy: 'inherit' })
+          setNotice('')
+          setError('')
+        },
+      },
+        h('span', { className: 'sr-policy-name' }, '继承主代理模型'),
+        h('span', { className: 'sr-policy-desc' }, '子代理直接复用主代理的模型与思考等级，不应用下方通用路由配置。'),
+      ),
+      h('button', {
+        type: 'button',
+        className: 'sr-policy-option',
+        role: 'radio',
+        'aria-checked': currentPolicy === 'rules',
+        disabled: isBlocked || !snapshot.canEditConfig,
+        onClick: () => {
+          setConfig({ ...config, fallbackPolicy: 'rules' })
+          setNotice('')
+          setError('')
+        },
+      },
+        h('span', { className: 'sr-policy-name' }, '使用路由规则'),
+        h('span', { className: 'sr-policy-desc' }, '查阅项目专属路由规则；未命中时使用下方配置的全局默认模型。'),
+      ),
+    ),
+  )
+
   // 可视化编辑区：全局兜底模型卡片（采用智能联动组件）
   const fallbackCard = h('div', { className: 'sr-card' },
     h('div', { className: 'sr-card-head' },
       h('h4', { className: 'sr-card-title' }, '全局默认模型（未匹配项目时使用）'),
     ),
     h('p', { className: 'sr-card-desc' }, '当子代理所在的工作区没有匹配到下方专属规则时使用。留空则直接继承父会话的模型。'),
+    policyInactive ? inactiveNote('policy-fallback') : null,
     h(RouteFields, {
       provider: fallback.provider ?? '',
       model: fallback.model ?? '',
@@ -458,6 +517,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       }, '+ 新增规则') : null,
     ),
     h('p', { className: 'sr-card-desc' }, '根据工作区目录前缀进行匹配；当同一个项目有多个匹配规则时，路径层级更深的规则生效。'),
+    policyInactive ? inactiveNote('policy-routes') : null,
     ruleEditorBox,
     routes.length === 0 && editingTarget === null ? h('div', { className: 'sr-empty' },
       h('p', { className: 'sr-empty-text' }, '暂无任何项目规则。子代理将使用全局兜底模型或继承主会话设置。'),
@@ -488,6 +548,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     h('p', { className: 'sr-card-desc' }, '支持直接编辑完整的路由表 YAML 内容，保存时保持结构化规范。修改会与可视化表单双向同步。'),
     h('textarea', {
       className: 'sr-textarea',
+      'aria-label': '路由表内容（YAML）',
       value: yamlText,
       disabled: isBlocked,
       spellCheck: false,
@@ -562,7 +623,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     navRow,
     error ? h('div', { className: 'sr-error', role: 'alert' }, error) : null,
     notice ? h('div', { className: 'sr-notice', role: 'status' }, notice) : null,
-    viewMode === 'visual' ? h('div', null, fallbackCard, routesCard) : yamlCard,
+    viewMode === 'visual' ? h('div', null, policyCard, fallbackCard, routesCard) : yamlCard,
     advancedDetails,
     footerBar,
   )

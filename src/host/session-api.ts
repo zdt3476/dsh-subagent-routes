@@ -1,21 +1,22 @@
 /**
- * 会话面板接口：右侧栏控制台读写「本会话的子代理路由」。
+ * 会话面板接口：控制台读写「本会话的子代理模型选择」。
  *
  * 与 settings-api 分开的理由：那条链路读写的是插件配置与路由表文件，带 revision 乐观锁；
- * 这条链路只读写当前会话的临时覆盖，语义和失败模式都不同，混在一个 handler 里会让
- * 「保存配置」「保存规则」「保存会话覆盖」三种意图互相纠缠。
+ * 这条链路只读写当前会话的选择，语义和失败模式都不同，混在一个 handler 里会让
+ * 「保存配置」「保存规则」「保存会话选择」三种意图互相纠缠。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import {
   SESSION_PATH,
   type CatalogProviderGroup,
+  type SessionMode,
   type SessionSnapshot,
 } from '../shared/settings'
-import { normalizeOverride, resolveEffective } from '../shared/overrides'
+import { normalizeSessionRecord, resolveEffective, type SessionRecord } from '../shared/overrides'
 import type { RouteSpec } from '../shared/yaml-utils'
 import { resolveConfig } from './config'
-import { OverrideStore } from './overrides'
+import { OverrideStore, routeOf } from './overrides'
 import { loadRouteTable, matchRouteWithPath, RouteTableError } from './routes'
 import { readTableSettings, saveTableSettings, SettingsError } from './settings'
 import { serializeRouteTable } from '../shared/yaml-utils'
@@ -57,6 +58,16 @@ function readSessionId(value: unknown): string {
   return trimmed
 }
 
+const SESSION_MODES: readonly SessionMode[] = ['follow', 'inherit', 'custom']
+
+function readMode(value: unknown): SessionMode {
+  if (value === undefined) return 'follow'
+  if (typeof value !== 'string' || !SESSION_MODES.includes(value as SessionMode)) {
+    throw new SettingsError('mode 必须是 follow / inherit / custom 之一')
+  }
+  return value as SessionMode
+}
+
 /** 读取路由字段；未出现的键视为「没有指定」，空串也按未指定处理。 */
 function readRoute(raw: unknown): { provider?: string; model?: string; reasoningEffort?: string } {
   const source = record(raw)
@@ -82,10 +93,16 @@ export interface SessionHandlerOptions {
   getCatalog?: () => Promise<CatalogProviderGroup[] | undefined>
 }
 
+/** 把持久化记录展开成界面需要的三态。 */
+function modeOf(session: SessionRecord | undefined): SessionMode {
+  if (session === undefined) return 'follow'
+  return session.mode === 'inherit' ? 'inherit' : 'custom'
+}
+
 /**
- * 组装一次会话快照：目录、工作区规则命中、覆盖与最终生效结果。
+ * 组装一次会话快照：目录、工作区规则命中、会话选择与最终生效结果。
  *
- * 每次都重读路由表与覆盖：控制台看到的就是「下一次派活会得到什么」，
+ * 每次都重读路由表与选择文件：控制台看到的就是「下一次派活会得到什么」，
  * 不维护第二个缓存副本。
  */
 export function buildSessionSnapshot(
@@ -93,7 +110,7 @@ export function buildSessionSnapshot(
   options: Pick<SessionHandlerOptions, 'rawConfig' | 'store' | 'lookup' | 'warn'>,
 ): SessionSnapshot {
   const config = resolveConfig(options.rawConfig)
-  const override = options.store.get(sessionId)
+  const session = options.store.get(sessionId)
   const directory = options.lookup?.directory(sessionId)
 
   let workspace: SessionSnapshot['workspace']
@@ -102,31 +119,38 @@ export function buildSessionSnapshot(
   // 否则面板会在表已损坏时仍然显示「规则正常」。
   try {
     const table = loadRouteTable(config.routesFile)
-    if (directory !== undefined) workspace = matchRouteWithPath(table, directory)
+    // 全局策略是继承时规则根本不会被用到，不该让面板展示一个注定不生效的命中。
+    if (directory !== undefined && config.fallbackPolicy === 'rules') {
+      workspace = matchRouteWithPath(table, directory)
+    }
   } catch (error) {
     tableAvailable = false
     const message = error instanceof RouteTableError ? error.message : String(error)
     options.warn(`subagent-routes: ${message}`)
   }
 
-  const effective = resolveEffective({
-    override,
+  const input = {
+    ...(session === undefined ? {} : { session }),
     ...(workspace === undefined ? {} : { workspace }),
-  })
+    defaultPolicy: config.fallbackPolicy,
+  }
+  const effective = resolveEffective(input)
 
   return {
     sessionId,
-    ...(effective === undefined ? {} : { effective }),
-    ...(override === undefined ? {} : { override }),
+    ...(session === undefined ? {} : { session }),
+    mode: modeOf(session),
     ...(workspace === undefined ? {} : { workspace }),
     ...(directory === undefined ? {} : { directory }),
     tableAvailable,
     enabled: config.enabled,
+    defaultPolicy: config.fallbackPolicy,
+    ...(effective === undefined ? {} : { effective }),
   }
 }
 
 export function createSessionHandler(options: SessionHandlerOptions): (request: Request) => Promise<Response> {
-  const { store, warn } = options
+  const { warn } = options
 
   return async request => {
     try {
@@ -161,7 +185,7 @@ export function createSessionHandler(options: SessionHandlerOptions): (request: 
       }
 
       const { action } = payload
-      if (action === 'save') return json(saveOverride(payload, options))
+      if (action === 'save') return json(saveSelection(payload, options))
       if (action === 'freeze') return json(freezeToWorkspace(payload, options))
       throw new SettingsError('请求参数只接受 action=save 或 action=freeze')
     } catch (error) {
@@ -173,20 +197,25 @@ export function createSessionHandler(options: SessionHandlerOptions): (request: 
   }
 }
 
-/** 保存或清除会话覆盖，返回保存后的最新快照。 */
-function saveOverride(
+/** 保存或清除会话选择，返回保存后的最新快照。 */
+function saveSelection(
   payload: Record<string, unknown>,
   options: Pick<SessionHandlerOptions, 'rawConfig' | 'store' | 'lookup' | 'warn'>,
 ): SessionSnapshot {
   const sessionId = readSessionId(payload.sessionId)
+  const mode = readMode(payload.mode)
   const raw = payload.override
-  // null 明确表示「清除，回到工作区规则」；缺字段则是客户端写错了。
-  if (raw === undefined) throw new SettingsError('override 字段缺失；清除请传 null')
-  let normalized: RouteSpec | undefined
+  // mode=custom 才需要路由字段；缺字段是客户端写错了，而不是「清除」。
+  if (mode === 'custom' && raw === undefined) {
+    throw new SettingsError('mode=custom 时必须提供 override 字段')
+  }
+  let normalized: SessionRecord | undefined
   try {
-    normalized = raw === null ? undefined : normalizeOverride(readRoute(raw))
+    const spec: RouteSpec | undefined =
+      raw === undefined || raw === null ? undefined : readRoute(raw)
+    normalized = normalizeSessionRecord(mode, spec)
   } catch (error) {
-    // normalizeOverride 的校验失败属于请求问题，不该报成 500。
+    // 规范化里的校验失败属于请求问题，不该报成 500。
     throw new SettingsError(error instanceof Error ? error.message : String(error))
   }
   options.store.set(sessionId, normalized)
@@ -194,9 +223,9 @@ function saveOverride(
 }
 
 /**
- * 把当前会话的覆盖固化为工作区规则。
+ * 把当前会话的指定固化为工作区规则。
  *
- * 语义是「保存为该项目以后的默认」：写入路由表后清除会话覆盖，
+ * 语义是「保存为该项目以后的默认」：写入路由表后清除会话选择，
  * 否则同一效果会被两处声明，用户改规则时会困惑于哪个在起作用。
  */
 function freezeToWorkspace(
@@ -204,8 +233,9 @@ function freezeToWorkspace(
   options: Pick<SessionHandlerOptions, 'rawConfig' | 'store' | 'lookup' | 'warn'>,
 ): SessionSnapshot {
   const sessionId = readSessionId(payload.sessionId)
-  const override = options.store.get(sessionId)
-  if (override === undefined) throw new SettingsError('当前会话没有临时覆盖，无法固化为项目规则')
+  const session = options.store.get(sessionId)
+  const override = routeOf(session)
+  if (override === undefined) throw new SettingsError('当前会话没有临时指定，无法固化为项目规则')
 
   const config = resolveConfig(options.rawConfig)
   const explicitPath = payload.path
@@ -238,7 +268,7 @@ function freezeToWorkspace(
 
   const text = serializeRouteTable(current.parsed?.fallback, nextRoutes)
   saveTableSettings(config.routesFile, { text, revision: current.revision })
-  // 规则已经承载同一效果，会话覆盖到此为止。
+  // 规则已经承载同一效果，会话选择到此为止。
   options.store.set(sessionId, undefined)
   return buildSessionSnapshot(sessionId, options)
 }

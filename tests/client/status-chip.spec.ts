@@ -10,6 +10,8 @@ const SNAPSHOT: SessionSnapshot = {
   directory: '/work/app',
   tableAvailable: true,
   enabled: true,
+  mode: 'follow',
+  defaultPolicy: 'rules',
   workspace: { spec: { provider: 'ws-p', model: 'ws-m' }, path: '/work/app' },
   effective: { source: 'workspace', spec: { provider: 'ws-p', model: 'ws-m' }, workspacePath: '/work/app' },
 }
@@ -48,20 +50,22 @@ describe('输入区状态药丸', () => {
 })
 
 describe('胶囊与面板必须对同一状态给出同一个说法', () => {
-  it('全局兜底只配了思考等级时，生效值不是「继承主会话」', async () => {
+  it('全局兜底只配了思考等级时，生效值不是「继承主代理」', async () => {
     const { describeRoute } = await import('../../src/client/route-text')
     // 复现用户看到的错配：来源是 fallback（面板显示「全局兜底」），
     // 但生效配置只有 reasoningEffort。旧实现里胶囊会因为缺 provider/model
-    // 而显示「继承主会话」，与面板的「全局兜底」自相矛盾。
+    // 而显示「继承主代理」，与面板的「全局兜底」自相矛盾。
     const snapshot: SessionSnapshot = {
       sessionId: 's1',
       directory: '/work/app',
       tableAvailable: true,
       enabled: true,
+      mode: 'follow',
+      defaultPolicy: 'rules',
       effective: { source: 'fallback', spec: { reasoningEffort: 'high' } },
     }
     const chip = describeRoute(snapshot)
-    expect(chip.label).not.toBe('继承主会话')
+    expect(chip.label).not.toBe('继承主代理')
     expect(chip.label).toBe('思考等级 high')
     expect(chip.sourceLabel).toBe('全局兜底')
   })
@@ -73,10 +77,12 @@ describe('胶囊与面板必须对同一状态给出同一个说法', () => {
       directory: undefined,
       tableAvailable: true,
       enabled: true,
+      mode: 'follow',
+      defaultPolicy: 'rules',
     }
     const chip = describeRoute(snapshot)
-    expect(chip.label).toBe('继承主会话')
-    expect(chip.sourceLabel).toBe('继承主会话')
+    expect(chip.label).toBe('继承主代理')
+    expect(chip.sourceLabel).toBe('继承主代理')
   })
 
   it('面板与胶囊共用同一套来源文案，不存在两份定义', async () => {

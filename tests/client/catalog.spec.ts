@@ -25,6 +25,17 @@ describe('模型目录工具', () => {
     expect(encodeModelKey('alpha', 'reasoner')).not.toBe(encodeModelKey('beta', 'reasoner'))
   })
 
+  it('任意特殊字符无碰撞且选项值不含物理 NUL', () => {
+    const provider = 'p\u0000:["/中文'
+    const model = 'm\u0000:]"/中文'
+    const key = encodeModelKey(provider, model)
+    expect(key).not.toContain('\u0000')
+    expect(decodeModelKey(key)).toEqual({ provider, model })
+    expect(encodeModelKey('a', 'b:c')).not.toBe(encodeModelKey('a:b', 'c'))
+    expect(decodeModelKey('["a", 1]')).toBeUndefined()
+    expect(decodeModelKey('["a", "b", "c"]')).toBeUndefined()
+  })
+
   it('拒绝无法识别的选项值', () => {
     expect(decodeModelKey('__custom__')).toBeUndefined()
     expect(decodeModelKey('')).toBeUndefined()

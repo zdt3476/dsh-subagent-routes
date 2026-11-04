@@ -118,6 +118,7 @@ function editableConfig(raw: unknown): PluginConfig {
     routesFile: typeof source.routesFile === 'string' ? source.routesFile.trim() : '',
     enabled: config.enabled,
     preflight: config.preflight,
+    fallbackPolicy: config.fallbackPolicy,
   }
 }
 
@@ -125,15 +126,25 @@ function configRevision(raw: unknown): string {
   return createHash('sha256').update(JSON.stringify(editableConfig(raw))).digest('hex')
 }
 
+const CONFIG_KEYS = ['routesFile', 'enabled', 'preflight', 'fallbackPolicy'] as const
+
 function validateConfig(raw: unknown): PluginConfig {
   const source = record(raw)
-  if (Object.keys(source).length !== 3 ||
-      Object.keys(source).some(key => !['routesFile', 'enabled', 'preflight'].includes(key)) ||
+  const keys = Object.keys(source)
+  const isPolicy = (value: unknown): value is PluginConfig['fallbackPolicy'] => value === 'inherit' || value === 'rules'
+  if (keys.length !== CONFIG_KEYS.length ||
+      keys.some(key => !(CONFIG_KEYS as readonly string[]).includes(key)) ||
       typeof source.routesFile !== 'string' || source.routesFile.length > 4096 || source.routesFile.includes('\0') ||
-      typeof source.enabled !== 'boolean' || typeof source.preflight !== 'boolean') {
-    throw new SettingsError('配置参数必须包含 routesFile 字符串、enabled 和 preflight 布尔值')
+      typeof source.enabled !== 'boolean' || typeof source.preflight !== 'boolean' ||
+      !isPolicy(source.fallbackPolicy)) {
+    throw new SettingsError('配置参数必须包含 routesFile 字符串、enabled / preflight 布尔值与 fallbackPolicy（inherit 或 rules）')
   }
-  return { routesFile: source.routesFile.trim(), enabled: source.enabled, preflight: source.preflight }
+  return {
+    routesFile: source.routesFile.trim(),
+    enabled: source.enabled,
+    preflight: source.preflight,
+    fallbackPolicy: source.fallbackPolicy,
+  }
 }
 
 function json(body: unknown, status = 200): Response {
@@ -142,16 +153,18 @@ function json(body: unknown, status = 200): Response {
 
 export function createSettingsHandler(
   rawConfig: unknown,
-  editor: ConfigEditor | undefined,
+  editorOrLookup: ConfigEditor | undefined | (() => ConfigEditor | undefined),
   warn: (message: string) => void,
   getCatalog?: () => Promise<CatalogProviderGroup[] | undefined>,
   getWorkspaces?: () => WorkspaceEntry[] | undefined,
 ): (request: Request) => Promise<Response> {
-  const findEntry = () => editor?.entries().find(entry => entry.options.id === PLUGIN_ID && entry.options.name === PACKAGE_NAME)
+  const getEditor = () => typeof editorOrLookup === 'function' ? editorOrLookup() : editorOrLookup
+  const findEntry = (editor = getEditor()) => editor?.entries().find(entry => entry.options.id === PLUGIN_ID && entry.options.name === PACKAGE_NAME)
   return async request => {
     try {
       if (request.method !== 'GET' && request.method !== 'PUT') return json({ error: 'method not allowed' }, 405)
-      const entry = findEntry()
+      const editor = getEditor()
+      const entry = findEntry(editor)
       const raw = entry?.options.config ?? rawConfig
       const config = resolveConfig(raw)
       if (request.method === 'GET') {
@@ -229,14 +242,14 @@ export function registerSettings(ctx: Context, rawConfig: unknown): void {
       ctx.logger.warn('subagent-routes: 当前宿主不支持安全设置接口')
       return
     }
-    const editor = injected.get('configEditor') as ConfigEditor | undefined
+    const getEditor = () => injected.get('configEditor') as ConfigEditor | undefined
     const getCatalog = () => buildCatalogFromLlm(injected.get('llm') as LlmCatalogService | undefined)
     const getWorkspaces = () => collectWorkspaces(injected.get('workspaceRegistry') as WorkspaceRegistryService | undefined)
     connection.fetch.register({
       path: SETTINGS_PATH,
       methods: ['GET', 'PUT'],
       requestBody: 'buffered',
-      fetch: createSettingsHandler(rawConfig, editor, message => ctx.logger.warn(message), getCatalog, getWorkspaces),
+      fetch: createSettingsHandler(rawConfig, getEditor, message => ctx.logger.warn(message), getCatalog, getWorkspaces),
     })
   })
 }

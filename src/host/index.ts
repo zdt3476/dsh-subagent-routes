@@ -19,6 +19,7 @@ import { buildCatalogFromLlm, registerSettings, type LlmCatalogService } from '.
 import { OverrideStore } from './overrides'
 import { registerSessionApi, type SessionLookup } from './session-api'
 import { resolveEffective } from '../shared/overrides'
+import type { RouteDefaultPolicy, SessionRecord } from '../shared/overrides'
 
 export { Config }
 
@@ -75,9 +76,9 @@ interface LlmService {
   ): Promise<unknown>
 }
 
-/** 会话覆盖读取面；宿主每次派活都重读，保证控制台的修改立刻可见。 */
+/** 会话选择读取面；宿主每次派活都重读，保证控制台的修改立刻可见。 */
 export interface OverrideSource {
-  get(sessionId: string): RouteSpec | undefined
+  get(sessionId: string): SessionRecord | undefined
 }
 
 /**
@@ -85,18 +86,21 @@ export interface OverrideSource {
  *
  * 返回 undefined 表示应当完全让位、不做任何改写：
  * - 调用方已经点名 provider/model；
- * - 工作区路由与会话覆盖都没有匹配，或它们要补的字段调用方都已显式给过。
+ * - 会话选择了继承主代理模型，或全局策略要求继承；
+ * - 工作区路由与会话选择都没有匹配，或它们要补的字段调用方都已显式给过。
  */
 export function routeOverride(
   explicit: AgentOptionsLike | undefined,
   table: RouteTable,
   directory: string,
-  override?: RouteSpec,
+  session?: SessionRecord,
+  defaultPolicy: RouteDefaultPolicy = 'rules',
 ): RouteSpec | undefined {
   return resolveEffective({
     explicit: explicit as RouteSpec | undefined,
-    override,
+    ...(session === undefined ? {} : { session }),
     workspace: matchRouteWithPath(table, directory),
+    defaultPolicy,
   })?.spec
 }
 
@@ -222,19 +226,21 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
       const directory = resolveDirectory(spec.request, workingDirectory)
       const sessionId = resolveSessionId(spec.request)
 
-      // 会话覆盖独立于路由表：即使路由表读不出来，控制台的选择也应该继续生效。
-      const override = sessionId === undefined ? undefined : overrides.get(sessionId)
+      // 会话选择独立于路由表：即使路由表读不出来，控制台的选择也应该继续生效。
+      const session = sessionId === undefined ? undefined : overrides.get(sessionId)
 
       const table = readTable()
-      // 拿不到目录时仍可应用会话覆盖：那是按会话而非目录定位的。
+      // 拿不到目录时仍可应用会话选择：那是按会话而非目录定位的。
+      // 全局策略是继承时也不必读表——路由表在这条路径上不会被用到。
       const workspace = table === undefined || directory === undefined
         ? undefined
         : matchRouteWithPath(table, directory)
 
       const effective = resolveEffective({
         explicit: spec.request.agentOptions as RouteSpec | undefined,
-        override,
+        ...(session === undefined ? {} : { session }),
         ...(workspace === undefined ? {} : { workspace }),
+        defaultPolicy: config.fallbackPolicy,
       })
       if (effective === undefined) return spec
 
@@ -254,7 +260,7 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
         }
       }
 
-      const source = effective.source === 'session' ? '会话覆盖' : effective.workspacePath ?? '全局默认'
+      const source = effective.source === 'session' ? '会话选择' : effective.workspacePath ?? '全局默认'
       logger.info(
         `subagent-routes: ${source} → ${agentOptions.provider ?? '(继承)'}/${agentOptions.model ?? '(继承)'}` +
           `${agentOptions.reasoningEffort === undefined ? '' : ` @${agentOptions.reasoningEffort}`}`,
