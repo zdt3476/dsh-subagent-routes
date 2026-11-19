@@ -77,7 +77,7 @@ function WorkspacePathField({ value, workspaces, disabled = false, onChange }: W
     ),
     custom || !hasOptions ? h('input', {
       type: 'text',
-      placeholder: '支持以 ~ 开头，例如 ~/Code/frontend-app 或 /Users/me/repo',
+      placeholder: '支持以 ~ 开头，例如 ~/PersonalRepos/products/frontend-app 或 ~/WorkRepos/company/repo',
       value,
       disabled,
       onChange: (e: { target: { value: string } }) => onChange(e.target.value),

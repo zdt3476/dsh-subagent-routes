@@ -40,7 +40,7 @@
 
 | 场景 | 没有本插件 | 有本插件 |
 |---|---|---|
-| 前端项目用强模型写代码 | 每次派活手动挑模型 | 进入 `~/Code/frontend-app` 自动用 |
+| 前端项目用强模型写代码 | 每次派活手动挑模型 | 进入 `~/PersonalRepos/products/frontend-app` 自动用 |
 | 长文档研究用最大思考等级 | 反复设置 reasoning effort | 目录命中后自动带上 `max` |
 | 临时脚本用便宜模型 | 容易忘记切换 | 按目录前缀自动落到低配 |
 | 一个仓库里不同子目录不同策略 | 无法表达 | 最长前缀匹配，深层覆盖浅层 |
@@ -213,7 +213,9 @@ Provider、Model、思考等级全部从**宿主已探测的列表**里选：
 ## 路由表格式与手动配置
 
 路由表默认位置 `$DSH_HOME/subagent-routes.yaml`（通常是 `~/.dsh/subagent-routes.yaml`）。
-可视化设置页就是它的编辑器；也可以直接手写：
+可视化设置页就是它的编辑器；也可以直接手写。迁移工作区时重新选择实际项目根，不复用旧绝对路径。个人和公司应使用独立的路由表与授权模型；混合使用同一配置时不要设指向个人模型供应商的全局兜底。
+
+下方是只用于个人工作区的格式示例：
 
 ```yaml
 # 可选的全局兜底：没有目录命中时使用
@@ -223,14 +225,14 @@ default:
   reasoningEffort: medium
 
 routes:
-  - path: ~/Code/frontend-app
+  - path: ~/PersonalRepos/products/frontend-app
     provider: anthropic
     model: claude-sonnet-4
     reasoningEffort: high
-  - path: ~/Code/frontend-app/legacy    # 更长前缀优先
+  - path: ~/PersonalRepos/products/frontend-app/legacy    # 更长前缀优先
     provider: deepseek
     model: deepseek-chat
-  - path: ~/Code/research
+  - path: ~/PersonalRepos/products/research
     reasoningEffort: max                # 只改等级，provider/model 继承父会话
 ```
 
@@ -279,7 +281,7 @@ routes:
 派活后看 DSH 日志：
 
 ```
-subagent-routes: /Users/you/Code/frontend-app → anthropic/claude-sonnet-4 @high
+subagent-routes: /Users/you/PersonalRepos/products/frontend-app → anthropic/claude-sonnet-4 @high
 ```
 
 或者看子会话的模型标识。
