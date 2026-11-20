@@ -65,18 +65,20 @@ function createHarness(options: {
 
   apply(ctx as never, { routesFile: options.routesFile, preflight: options.preflight ?? true })
 
-  const delegate = (): Promise<unknown> =>
-    service.startActivation({
-      provider: 'spawn',
-      label: 'work',
-      signal: new AbortController().signal,
-      delivery: 'parent',
-      request: {
-        parent: { session: { header: { cwd: options.directory ?? '/work/frontend/src' } } },
-        prompt: [],
-        ...(options.explicitOptions === undefined ? {} : { agentOptions: options.explicitOptions }),
-      },
-    })
+  const makeActivation = () => ({
+    provider: 'spawn',
+    label: 'work',
+    signal: new AbortController().signal,
+    delivery: 'parent',
+    parent: { session: { header: { cwd: options.directory ?? '/work/frontend/src' } } },
+    prompt: [{ type: 'text', text: 'work' }],
+    ...(options.explicitOptions === undefined ? {} : { agentOptions: options.explicitOptions }),
+  })
+
+  const delegate = (): Promise<unknown> => {
+    const { parent, prompt, agentOptions, ...activation } = makeActivation()
+    return service.startActivation({ ...activation, request: { parent, prompt, agentOptions } })
+  }
 
   return {
     captured: service.captured,
@@ -86,6 +88,7 @@ function createHarness(options: {
     llm,
     disposers,
     delegate,
+    makeActivation,
   }
 }
 
@@ -110,6 +113,53 @@ const TABLE = [
   '    model: acme-large',
   '    reasoningEffort: max',
 ].join('\n')
+
+describe('DSH 顶层派活参数', () => {
+  it('空路由表时将原始派活请求交给宿主', async () => {
+    const harness = createHarness({ routesFile: routeFile('routes: []') })
+    const spec = harness.makeActivation()
+
+    await expect(harness.service.startActivation(spec)).resolves.toEqual({ childId: 'child-1' })
+
+    expect(harness.captured[0]!.spec).toBe(spec)
+    expect(harness.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+
+  it('用顶层 cwd 匹配路由，只改写顶层 agentOptions', async () => {
+    const harness = createHarness({
+      routesFile: routeFile(TABLE),
+      directory: '/work',
+      explicitOptions: { maxTokens: 4096 },
+    })
+    const spec = { ...harness.makeActivation(), cwd: 'frontend/src', name: 'worker', childId: 'reserved' }
+
+    await harness.service.startActivation(spec)
+
+    const route = { provider: 'acme-gateway', model: 'acme-large', reasoningEffort: 'max' }
+    const routed = harness.captured[0]!.spec
+    expect(routed).toStrictEqual({ ...spec, agentOptions: { maxTokens: 4096, ...route } })
+    expect(routed.parent).toBe(spec.parent)
+    expect(harness.llm.resolveCallConfig).toHaveBeenCalledWith(route, spec.signal)
+  })
+
+  it('保留顶层调用方显式指定的模型', async () => {
+    const harness = createHarness({ routesFile: routeFile(TABLE), explicitOptions: { provider: 'p', model: 'm' } })
+    const spec = harness.makeActivation()
+    await harness.service.startActivation(spec)
+
+    expect(harness.captured[0]!.spec).toBe(spec)
+    expect(harness.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+
+  it('无法识别请求结构时交还宿主处理', async () => {
+    const harness = createHarness({ routesFile: routeFile(TABLE) })
+    const spec = { provider: 'spawn', request: undefined }
+    await harness.service.startActivation(spec)
+
+    expect(harness.captured[0]!.spec).toBe(spec)
+    expect(harness.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+})
 
 describe('apply', () => {
   it('命中工作区时把路由合并进 agentOptions', async () => {

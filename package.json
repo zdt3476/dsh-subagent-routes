@@ -1,7 +1,14 @@
 {
   "name": "@zdt3476/dsh-subagent-routes",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zdt3476/dsh-subagent-routes.git"
+  },
   "type": "module",
   "description": "按工作区目录给子智能体指定 provider/模型/思考等级的路由表：最长前缀匹配后注入子代理 AgentOptions。",
   "icon": "icon.svg",
@@ -25,6 +32,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "docs/images/*.png",
     "LICENSE"
   ],
   "dsh": {

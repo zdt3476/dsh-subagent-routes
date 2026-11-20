@@ -184,7 +184,7 @@ Provider、Model、思考等级全部从**宿主已探测的列表**里选：
 
 1. 读父会话的**当前工作目录**（`workingDirectory` 投影优先，回落到会话头 `cwd`）；
 2. 在路由表里做**最长前缀匹配**；
-3. 把匹配到的 provider / model / reasoningEffort 合并进 `request.agentOptions`；
+3. 把匹配到的 provider / model / reasoningEffort 合并进派活参数的 `agentOptions`，保留宿主传入的结构（顶层或旧版的 `request`）；
 4. 按需调用 `llm.resolveCallConfig()` 预检，路由非法时在派活处直接失败。
 
 派活时不写会话事件、不改 profile；只有**用户保存基础配置**时才会通过宿主

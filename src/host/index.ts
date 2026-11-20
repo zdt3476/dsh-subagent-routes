@@ -23,14 +23,9 @@ import type { RouteDefaultPolicy, SessionRecord } from '../shared/overrides'
 
 export { Config }
 
-/** startActivation 的最小结构；只描述本插件读写的字段，避免依赖未导出的类型。 */
-interface ActivationSpec {
-  readonly provider: string
-  readonly label?: string
-  readonly childId?: unknown
-  readonly request: ActivationRequest
+/** 新版在顶层传派活参数，旧版将它们放在 request 内。 */
+type ActivationSpec = (ActivationRequest | { readonly request: ActivationRequest }) & {
   readonly signal?: AbortSignal
-  readonly delivery?: 'parent' | 'caller'
 }
 
 interface ActivationRequest {
@@ -220,11 +215,15 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
     const original = service.startActivation
 
     const routeSpec = async (spec: ActivationSpec): Promise<ActivationSpec> => {
-      if (spec === null || typeof spec !== 'object' || spec.request === null) return spec
+      if (spec === null || typeof spec !== 'object') return spec
+
+      const request = 'parent' in spec ? spec : spec.request
+      if (request?.parent === null || typeof request?.parent !== 'object') return spec
+      if (request.cwd !== undefined && typeof request.cwd !== 'string') return spec
 
       const workingDirectory = injected.get('workingDirectory') as WorkingDirectoryService | undefined
-      const directory = resolveDirectory(spec.request, workingDirectory)
-      const sessionId = resolveSessionId(spec.request)
+      const directory = resolveDirectory(request, workingDirectory)
+      const sessionId = resolveSessionId(request)
 
       // 会话选择独立于路由表：即使路由表读不出来，控制台的选择也应该继续生效。
       const session = sessionId === undefined ? undefined : overrides.get(sessionId)
@@ -237,14 +236,14 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
         : matchRouteWithPath(table, directory)
 
       const effective = resolveEffective({
-        explicit: spec.request.agentOptions as RouteSpec | undefined,
+        explicit: request.agentOptions as RouteSpec | undefined,
         ...(session === undefined ? {} : { session }),
         ...(workspace === undefined ? {} : { workspace }),
         defaultPolicy: config.fallbackPolicy,
       })
       if (effective === undefined) return spec
 
-      const agentOptions = mergeAgentOptions(spec.request.agentOptions, effective.spec)
+      const agentOptions = mergeAgentOptions(request.agentOptions, effective.spec)
       if (config.preflight && agentOptions.provider !== undefined && agentOptions.model !== undefined) {
         const llm = injected.get('llm') as LlmService | undefined
         if (llm !== undefined) {
@@ -265,7 +264,9 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
         `subagent-routes: ${source} → ${agentOptions.provider ?? '(继承)'}/${agentOptions.model ?? '(继承)'}` +
           `${agentOptions.reasoningEffort === undefined ? '' : ` @${agentOptions.reasoningEffort}`}`,
       )
-      return { ...spec, request: { ...spec.request, agentOptions } }
+      return request === spec
+        ? { ...spec, agentOptions }
+        : { ...spec, request: { ...request, agentOptions } }
     }
 
     let active = true
