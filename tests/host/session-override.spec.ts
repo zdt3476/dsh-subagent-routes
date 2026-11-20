@@ -9,6 +9,10 @@ import { OverrideStore } from '../../src/host/overrides'
 class FakeSubagents {
   readonly captured: Array<{ spec: Record<string, unknown> }> = []
 
+  getProvider(name: string) {
+    return name === 'spawn' ? { capabilities: { agentOptions: true } } : undefined
+  }
+
   async startActivation(spec: Record<string, unknown>): Promise<unknown> {
     this.captured.push({ spec })
     return { childId: 'child-1' }
@@ -20,6 +24,7 @@ interface Harness {
   captured: Array<{ spec: Record<string, unknown> }>
   store: OverrideStore
   llm: { resolveCallConfig: ReturnType<typeof vi.fn> }
+  warnings: string[]
 }
 
 const dirs: string[] = []
@@ -62,9 +67,10 @@ function harness(options: {
   const store = new OverrideStore(join(tempDir(), 'overrides.json'))
   const directory = options.directory ?? '/work/frontend/src'
   const llm = { resolveCallConfig: vi.fn(async () => ({})) }
+  const warnings: string[] = []
   const proxy = { [symbols.original]: service }
   const ctx = {
-    logger: { info: vi.fn(), warn: vi.fn() },
+    logger: { info: vi.fn(), warn: (message: string) => warnings.push(message) },
     get: (name: string) => {
       if (name === 'workingDirectory') return { get: () => directory }
       if (name === 'llm') return llm
@@ -88,6 +94,7 @@ function harness(options: {
   return {
     store,
     llm,
+    warnings,
     captured: service.captured,
     delegate: (sessionId?: string) =>
       service.startActivation({
@@ -244,5 +251,33 @@ describe('全局默认策略与继承主代理模型', () => {
     await h.delegate('s2')
 
     expect(h.captured[0]!.spec).toMatchObject({ request: { agentOptions: { provider: 'ws-p' } } })
+  })
+
+  it('不需要路由表的路径直接短路，不因损坏路由表产生读盘与告警', async () => {
+    const cases = [
+      harness({ table: 'routes: [', fallbackPolicy: 'inherit' }),
+      harness({ table: 'routes: [', explicitOptions: { provider: 'caller-p', model: 'caller-m' } }),
+      (() => {
+        const h = harness({ table: 'routes: [' })
+        h.store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
+        return h
+      })(),
+      (() => {
+        const h = harness({ table: 'routes: [' })
+        h.store.set('s1', { mode: 'inherit' })
+        return h
+      })(),
+    ]
+    for (const h of cases) {
+      h.warnings.length = 0
+      await h.delegate('s1')
+      expect(h.warnings).toEqual([])
+    }
+
+    // 对照：确实需要查工作区路由表时，损坏路由表会告警并按无路由处理。
+    const needsTable = harness({ table: 'routes: [' })
+    needsTable.warnings.length = 0
+    await needsTable.delegate('s1')
+    expect(needsTable.warnings.join('\n')).toContain('路由表')
   })
 })

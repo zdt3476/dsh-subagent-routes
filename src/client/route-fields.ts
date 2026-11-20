@@ -109,12 +109,30 @@ export function RouteFields({
   const text = { ...DEFAULT_LABELS, ...labels }
   const hasCatalog = Array.isArray(catalog) && catalog.length > 0
   const matchedGroup = hasCatalog ? catalog.find(group => group.id === provider) : undefined
-  const located = locateModel(catalog, model)
+  // 只有未指定 Provider 时才跨厂商定位模型，避免自定义厂商的同名模型借用其他厂商元数据。
+  const located = provider === '' ? locateModel(catalog, model) : undefined
 
   const modelsInGroup = matchedGroup?.models ?? []
   const matchedModel = matchedGroup ? modelsInGroup.find(item => item.id === model) : located?.entry
   const [customProvider, setCustomProvider] = useState<boolean>(!hasCatalog || (Boolean(provider) && !matchedGroup))
-  const [customModel, setCustomModel] = useState<boolean>(!hasCatalog || (Boolean(model) && !located))
+  const [customModel, setCustomModel] = useState<boolean>(!hasCatalog || (Boolean(model) && matchedModel === undefined))
+  const [synced, setSynced] = useState({ hasCatalog, provider, model })
+
+  if (synced.hasCatalog !== hasCatalog || synced.provider !== provider || synced.model !== model) {
+    const catalogLoaded = !synced.hasCatalog && hasCatalog
+    setSynced({ hasCatalog, provider, model })
+    if (!hasCatalog) {
+      setCustomProvider(true)
+      setCustomModel(true)
+    } else if (catalogLoaded) {
+      setCustomProvider(Boolean(provider) && !matchedGroup)
+      setCustomModel(Boolean(model) && matchedModel === undefined)
+    } else {
+      // 外部切换带来目录外的值时自动切回手动输入，避免在下拉框中隐身；手动编辑中保留现状。
+      if (!customProvider && Boolean(provider) && !matchedGroup) setCustomProvider(true)
+      if (!customModel && Boolean(model) && matchedModel === undefined) setCustomModel(true)
+    }
+  }
 
   const reasoningInfo = matchedModel?.reasoning
   const isReasoningExplicitlyUnsupported = Boolean(
@@ -143,7 +161,8 @@ export function RouteFields({
     }
     setCustomModel(false)
     if (value === '') {
-      onChange({ provider, model: '', reasoningEffort })
+      // 允许继承的下拉模式下清空模型时同步清空厂商，与清空厂商联动对称，避免产生半填状态。
+      onChange({ provider: allowInherit && !customProvider ? '' : provider, model: '', reasoningEffort })
       return
     }
     const picked = decodeModelKey(value)
@@ -233,7 +252,7 @@ export function RouteFields({
     }) : h('select', {
       id: modelId,
       className: classes.select,
-      value: model && (matchedModel !== undefined || located !== undefined)
+      value: model && matchedModel !== undefined
         ? encodeModelKey(provider || located?.group.id || '', model)
         : '',
       disabled,

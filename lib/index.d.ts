@@ -1,10 +1,13 @@
 
 import { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-interface RouteSpec$1 {
+interface RouteSpec {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+}
+interface WorkspaceRoute extends RouteSpec {
+  path: string;
 }
 /** 没有任何规则命中时的全局默认策略：继承主代理模型，还是照常查路由表。 */
 type RouteDefaultPolicy = 'inherit' | 'rules';
@@ -18,7 +21,7 @@ type SessionRecord = {
   mode: 'inherit';
 } | ({
   mode: 'custom';
-} & RouteSpec$1);
+} & RouteSpec);
 export declare const Config: z<Schemastery.ObjectS<NoInfer<{
   routesFile: z<string, string, "defined">;
   enabled: z<boolean, boolean, "defined">;
@@ -30,22 +33,6 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
   preflight: z<boolean, boolean, "defined">;
   fallbackPolicy: z<"inherit" | "rules", "inherit" | "rules", "defined">;
 }>>, "plain">;
-/**
- * 工作区路由表的读取、校验与前缀匹配。
- *
- * 路由表是插件唯一的事实来源：它不写会话事件、不改 profile，只在派活时
- * 被查询一次。文件不存在视为「没有配置任何路由」，不是错误。
- */
-/** 要注入子代理的 LLM 选项；至少有一个字段。 */
-interface RouteSpec {
-  readonly provider?: string;
-  readonly model?: string;
-  readonly reasoningEffort?: string;
-}
-/** 绑定到具体目录的路由条目。 */
-interface WorkspaceRoute extends RouteSpec {
-  readonly path: string;
-}
 /** 解析后的路由表：全局兜底与按目录匹配的条目分开保存。 */
 interface RouteTable {
   readonly fallback: RouteSpec | undefined;

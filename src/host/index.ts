@@ -14,17 +14,19 @@
 import { symbols, type Context } from '@deepseek-ai/cordis'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Config, resolveConfig, type ResolvedConfig } from './config'
-import { loadRouteTable, matchRouteWithPath, RouteTableError, type RouteSpec, type RouteTable } from './routes'
+import { loadRouteTable, matchRouteWithPath, normalizeDirectory, RouteTableError, type RouteSpec, type RouteTable } from './routes'
 import { buildCatalogFromLlm, registerSettings, type LlmCatalogService } from './settings-api'
 import { OverrideStore } from './overrides'
 import { registerSessionApi, type SessionLookup } from './session-api'
-import { resolveEffective } from '../shared/overrides'
+import { isEmptyRoute, isRoutePinned, resolveEffective } from '../shared/overrides'
 import type { RouteDefaultPolicy, SessionRecord } from '../shared/overrides'
 
 export { Config }
 
 /** 新版在顶层传派活参数，旧版将它们放在 request 内。 */
 type ActivationSpec = (ActivationRequest | { readonly request: ActivationRequest }) & {
+  /** 执行后端名称，不是 agentOptions.provider 中的 LLM 供应商。 */
+  readonly provider?: string
   readonly signal?: AbortSignal
 }
 
@@ -56,6 +58,8 @@ interface AgentOptionsLike {
 /** subagents 服务上本插件需要的最小接口。 */
 interface SubagentsService {
   startActivation(spec: ActivationSpec): Promise<unknown>
+  /** 旧宿主可能没有能力查询；无法确认支持时不注入。 */
+  getProvider?(name: string): { readonly capabilities?: { readonly agentOptions?: boolean } } | undefined
 }
 
 /** workingDirectory 服务的最小接口。 */
@@ -116,7 +120,7 @@ export function resolveDirectory(
   if (explicit !== undefined && isAbsolute(explicit)) return resolve(explicit)
   const session = request.parent?.session
   // 优先用 workingDirectory 投影（含 `cd` 之后的当前目录），回落到会话头的原始项目目录。
-  const current = session === undefined ? undefined : (workingDirectory?.get(session) ?? session.header?.cwd)
+  const current = normalizeDirectory(session === undefined ? undefined : (workingDirectory?.get(session) ?? session.header?.cwd))
   if (current === undefined) return undefined
   return explicit === undefined ? current : resolve(current, explicit)
 }
@@ -217,26 +221,40 @@ export function apply(ctx: Context, rawConfig?: unknown, options: ApplyOptions =
     const routeSpec = async (spec: ActivationSpec): Promise<ActivationSpec> => {
       if (spec === null || typeof spec !== 'object') return spec
 
+      // provider 是执行后端名，不是 agentOptions.provider 里的 LLM 供应商。
+      // 只有宿主明确声明后端支持 agentOptions 时才路由与预检；旧版或未知后端原样放行。
+      const backendName = spec.provider
+      if (typeof backendName !== 'string' || service.getProvider?.(backendName)?.capabilities?.agentOptions !== true) {
+        return spec
+      }
+
       const request = 'parent' in spec ? spec : spec.request
       if (request?.parent === null || typeof request?.parent !== 'object') return spec
       if (request.cwd !== undefined && typeof request.cwd !== 'string') return spec
 
-      const workingDirectory = injected.get('workingDirectory') as WorkingDirectoryService | undefined
-      const directory = resolveDirectory(request, workingDirectory)
-      const sessionId = resolveSessionId(request)
+      const explicit = request.agentOptions as RouteSpec | undefined
+      // 调用方已点名 provider/model：整体让位，不必读覆盖文件或路由表。
+      if (isRoutePinned(explicit)) return spec
 
+      const sessionId = resolveSessionId(request)
       // 会话选择独立于路由表：即使路由表读不出来，控制台的选择也应该继续生效。
       const session = sessionId === undefined ? undefined : overrides.get(sessionId)
+      if (session?.mode === 'inherit') return spec
 
-      const table = readTable()
-      // 拿不到目录时仍可应用会话选择：那是按会话而非目录定位的。
-      // 全局策略是继承时也不必读表——路由表在这条路径上不会被用到。
-      const workspace = table === undefined || directory === undefined
-        ? undefined
-        : matchRouteWithPath(table, directory)
+      const sessionTakesOver = session?.mode === 'custom' && !isEmptyRoute(session)
+      let workspace: { spec: RouteSpec; path?: string } | undefined
+      // 仅在真正需要工作区路由表时才同步读盘与解析 YAML。
+      if (!sessionTakesOver && config.fallbackPolicy === 'rules') {
+        const workingDirectory = injected.get('workingDirectory') as WorkingDirectoryService | undefined
+        const directory = resolveDirectory(request, workingDirectory)
+        if (directory !== undefined) {
+          const table = readTable()
+          if (table !== undefined) workspace = matchRouteWithPath(table, directory)
+        }
+      }
 
       const effective = resolveEffective({
-        explicit: request.agentOptions as RouteSpec | undefined,
+        explicit,
         ...(session === undefined ? {} : { session }),
         ...(workspace === undefined ? {} : { workspace }),
         defaultPolicy: config.fallbackPolicy,

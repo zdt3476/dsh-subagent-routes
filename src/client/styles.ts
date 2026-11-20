@@ -16,6 +16,7 @@ export const SETTINGS_CSS = `
   --sr-success: #15803d;
   --sr-success-bg: #f0fdf4;
   --sr-warning: #d97706;
+  --sr-warning-text: #b45309;
   --sr-warning-bg: #fffbeb;
   --sr-tag-bg: #e0f2fe;
   --sr-tag-text: #0369a1;
@@ -43,6 +44,7 @@ export const SETTINGS_CSS = `
   --sr-success: #4ade80;
   --sr-success-bg: #052e1644;
   --sr-warning: #fbbf24;
+  --sr-warning-text: #fbbf24;
   --sr-warning-bg: #451a0344;
   --sr-tag-bg: #07598544;
   --sr-tag-text: #7dd3fc;
@@ -288,6 +290,7 @@ export const SETTINGS_CSS = `
 .sr-field select { cursor: pointer; }
 .sr-field input::placeholder { color: var(--sr-muted); opacity: 0.8; }
 .sr-hint { font-size: 12px; line-height: 16px; color: var(--sr-muted); overflow-wrap: anywhere; }
+.sr-hint.is-warn { color: var(--sr-warning-text); font-weight: 500; }
 
 /* 禁用态（通用控件） */
 .sr-field input:disabled, .sr-field select:disabled, .sr-textarea:disabled {

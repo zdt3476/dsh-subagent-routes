@@ -48,8 +48,7 @@ export const PANEL_CSS = `
  * 但令牌缺失时（宿主版本差异、隔离预览）回退值是浅色的，深色主题下会亮成一块白板。
  * 这里按既有设置页同样的约定补一套深色回退，保证缺令牌时也不会刺眼。
  */
-[data-ds-dark-theme] .sr-panel,
-[data-ds-dark-theme] .sr-popover-anchor {
+[data-ds-dark-theme] .sr-panel {
   --srp-text: var(--dsw-alias-label-primary, #f2f1ee);
   --srp-muted: var(--dsw-alias-label-secondary, #a8a7a2);
   --srp-faint: var(--dsw-alias-label-secondary, #a8a7a2);
@@ -76,9 +75,7 @@ export const PANEL_CSS = `
   overscroll-behavior: contain;
 }
 
-/* 浮层模式修饰：高度自适应、受视口约束并允许内部滚动 */
-
-/* 标题区：支持横排与可选关闭按钮 */
+/* 标题区 */
 .srp-head {
   display: flex;
   align-items: flex-start;
@@ -96,35 +93,6 @@ export const PANEL_CSS = `
   font-size: 12px;
   line-height: 18px;
   color: var(--srp-muted);
-}
-
-/* 浮层关闭按钮 */
-.srp-close-btn {
-  appearance: none;
-  background: transparent;
-  border: none;
-  border-radius: var(--dsw-radius-sm, 6px);
-  /* 32px 热区：24px 处于 WCAG 2.5.8 的下限，鼠标快速划过时容易点空或误触外部关闭 */
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  line-height: 1;
-  color: var(--srp-muted);
-  cursor: pointer;
-  flex: none;
-  padding: 0;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-.srp-close-btn:hover {
-  background: var(--srp-card-hover);
-  color: var(--srp-text);
-}
-.srp-close-btn:focus-visible {
-  outline: 2px solid var(--srp-accent);
-  outline-offset: 1px;
 }
 
 /* 响应式两栏容器（宽屏两栏、窄屏堆叠） */
@@ -350,17 +318,8 @@ export const PANEL_CSS = `
 }
 `
 
-/**
- * 输入区就地浮层容器的样式。
- *
- * 挂载在 conversation.input.overlay 槽位内。
- * 宿主该槽位锚点在 composer card 内：position:absolute; inset:0 0 auto; height:0。
- * 按照 DSH 官方命令弹窗标准规格：
- * position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; z-index: 100;
- * box-shadow: var(--dsw-elevation-prominent); border-radius: var(--dsw-radius-md)。
- */
 /*
- * 浮层容器：portal 挂到 body，用 fixed 定位 + 组件算出的 left/top。
+ * 输入区就地浮层容器：portal 挂到 body，用 fixed 定位 + 组件算出的 left/top/bottom。
  *
  * 不能用绝对定位挂在 composer 的 overlay 锚点上：那个锚点高 0 且在卡片内，
  * 真实宿主里会把浮层压扁（曾只剩 181px）。fixed + portal 完全避开这层约束。

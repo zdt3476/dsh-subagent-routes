@@ -1,8 +1,9 @@
-import { createElement as h, useEffect, useState, type ReactElement } from 'react'
-import type { PluginConfig, RouteSpec, SettingsSnapshot, WorkspaceEntry, WorkspaceRoute } from '../shared/settings'
-import { parseSimpleRouteYaml, serializeRouteTable } from '../shared/yaml-utils'
+import { createElement as h, useEffect, useId, useState, type ReactElement } from 'react'
+import type { PluginConfig, RouteSpec, SettingsSnapshot, TableSettings, WorkspaceEntry, WorkspaceRoute } from '../shared/settings'
+import { editRouteYaml, parseRouteYaml } from '../shared/yaml-utils'
 import { RouteFields, type RouteFieldsClasses } from './route-fields'
 import { settingsApi, type SettingsApi } from './services'
+import { saveSettingsDraft, settingsChanges } from './settings-save'
 import { SETTINGS_CSS } from './styles'
 
 export interface SettingsProps {
@@ -29,6 +30,13 @@ const SETTINGS_CLASSES: RouteFieldsClasses = {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** 仅用于表单内提前查重：去掉非根目录的尾部分隔符，不改写原始拼写。 */
+function pathCompareKey(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed === '/' || /^[a-zA-Z]:[/\\]$/.test(trimmed)) return trimmed
+  return trimmed.replace(/[/\\]+$/, '')
 }
 
 export function SettingsPanel({ view, api = settingsApi }: SettingsProps): ReactElement {
@@ -63,11 +71,12 @@ function WorkspacePathField({ value, workspaces, disabled = false, onChange }: W
   const options = workspaces ?? []
   const hasOptions = options.length > 0
   const matched = hasOptions ? options.some(item => item.path === value) : false
+  const inputId = useId()
   const [custom, setCustom] = useState<boolean>(!hasOptions || (value !== '' && !matched))
 
   return h('div', { className: 'sr-field' },
     h('div', { className: 'sr-field-head' },
-      h('label', null, '项目根目录绝对路径 *'),
+      h('label', { htmlFor: inputId }, '项目根目录绝对路径 *'),
       hasOptions ? h('button', {
         type: 'button',
         className: 'sr-field-link',
@@ -77,11 +86,13 @@ function WorkspacePathField({ value, workspaces, disabled = false, onChange }: W
     ),
     custom || !hasOptions ? h('input', {
       type: 'text',
+      id: inputId,
       placeholder: '支持以 ~ 开头，例如 ~/Code/frontend-app 或 /Users/me/repo',
       value,
       disabled,
       onChange: (e: { target: { value: string } }) => onChange(e.target.value),
     }) : h('select', {
+      id: inputId,
       value: matched ? value : '',
       disabled,
       onChange: (e: { target: { value: string } }) => {
@@ -121,23 +132,37 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
   const [busy, setBusy] = useState<'load' | 'saving' | null>('load')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [yamlIssue, setYamlIssue] = useState('')
+  const [refreshRequired, setRefreshRequired] = useState(false)
+  const [tableResetKey, setTableResetKey] = useState(0)
+  const pathFieldId = useId()
+
+  const adoptTable = (table: TableSettings | null) => {
+    const text = table?.text ?? ''
+    setYamlText(text)
+    setEditingTarget(null)
+    setFormState(EMPTY_FORM)
+    setFormError('')
+    setTableResetKey(current => current + 1)
+    try {
+      if (table?.validationError !== undefined) throw new Error(table.validationError)
+      const parsed = parseRouteYaml(text)
+      setFallback(parsed.fallback ?? {})
+      setRoutes(parsed.routes)
+      setYamlIssue('')
+    } catch (err) {
+      setFallback({})
+      setRoutes([])
+      setYamlIssue(`现有文件校验失败：${message(err)}`)
+      setViewMode('yaml')
+    }
+  }
 
   const receive = (next: SettingsSnapshot) => {
     setSnapshot(next)
     setConfig(next.config)
-    const rawText = next.table?.text ?? ''
-    setYamlText(rawText)
-
-    if (next.table?.parsed) {
-      setFallback(next.table.parsed.fallback ?? {})
-      setRoutes([...next.table.parsed.routes])
-    } else {
-      const parsed = parseSimpleRouteYaml(rawText)
-      if (parsed.data) {
-        setFallback(parsed.data.fallback ?? {})
-        setRoutes([...parsed.data.routes])
-      }
-    }
+    setRefreshRequired(false)
+    adoptTable(next.table)
   }
 
   useEffect(() => {
@@ -152,20 +177,23 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     return () => controller.abort()
   }, [api])
 
-  const configDirty = snapshot !== null && JSON.stringify(config) !== JSON.stringify(snapshot.config)
-  const tableDirty = snapshot?.table != null && yamlText !== snapshot.table.text
-  const isDirty = configDirty || tableDirty
+  const { configDirty, tableDirty, pathDirty } = snapshot && config
+    ? settingsChanges(snapshot, config, yamlText)
+    : { configDirty: false, tableDirty: false, pathDirty: false }
+  const fallbackIncomplete = (fallback.provider === undefined) !== (fallback.model === undefined)
+  const hasTableDraft = tableDirty || fallbackIncomplete || editingTarget !== null
+  const hasDraft = configDirty || hasTableDraft
 
   useEffect(() => {
-    if (!isDirty) return
+    if (!hasDraft) return
     const handler = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [isDirty])
+  }, [hasDraft])
 
   const reload = async () => {
-    if (isDirty && !window.confirm('重新读取会放弃未保存的修改，是否继续？')) return
-    setBusy('load'); setError(''); setNotice(''); setEditingTarget(null)
+    if (hasDraft && !window.confirm('重新读取会放弃未保存的修改，是否继续？')) return
+    setBusy('load'); setError(''); setNotice('')
     try {
       receive(await api.load())
     } catch (err) {
@@ -175,69 +203,53 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     }
   }
 
-  // 可视化变更同步生成 YAML
-  const syncToYaml = (nextFallback: RouteSpec, nextRoutes: WorkspaceRoute[]) => {
-    setFallback(nextFallback)
-    setRoutes(nextRoutes)
-    const text = serializeRouteTable(nextFallback, nextRoutes)
-    setYamlText(text)
-  }
-
-  // 切换至可视化时解析 YAML
   const handleSwitchTab = (targetMode: 'visual' | 'yaml') => {
-    if (targetMode === 'visual' && viewMode === 'yaml') {
-      const parsed = parseSimpleRouteYaml(yamlText)
-      if (parsed.data) {
-        setFallback(parsed.data.fallback ?? {})
-        setRoutes([...parsed.data.routes])
+    if (targetMode === viewMode) return
+    if (editingTarget !== null || fallbackIncomplete) {
+      setError('请先完成或取消正在编辑的规则，再切换编辑模式。')
+      return
+    }
+    if (targetMode === 'visual') {
+      try {
+        const saved = snapshot?.table
+        if (saved?.text === yamlText && saved.validationError !== undefined) {
+          throw new Error(saved.validationError)
+        }
+        const parsed = parseRouteYaml(yamlText)
+        setFallback(parsed.fallback ?? {})
+        setRoutes(parsed.routes)
+        setTableResetKey(current => current + 1)
+        setYamlIssue('')
+      } catch (err) {
+        setYamlIssue(`无法切换到规则设置，请先修正 YAML：${message(err)}`)
+        return
       }
     }
     setViewMode(targetMode)
     setError('')
   }
 
-  // 保存所有更改（统一保存）
   const handleSaveAll = async () => {
-    if (snapshot === null || config === null || !isDirty) return
-    if (editingTarget !== null) {
-      setError('请先完成或取消当前单条规则的编辑（点击「确认保存规则」或「取消」）后再保存全局设置。')
-      return
-    }
+    if (snapshot === null || config === null || busy !== null || refreshRequired ||
+        (!configDirty && !tableDirty) || editingTarget !== null || fallbackIncomplete) return
     setBusy('saving'); setError(''); setNotice('')
-
     try {
-      let currentTableRev = snapshot.table?.revision
-
-      // 1. 如果基础配置改了且支持编辑，先保存基础设置
-      if (configDirty && snapshot.canEditConfig) {
-        await api.saveConfig(config, snapshot.configRevision)
-        if (config.routesFile !== snapshot.config.routesFile) {
-          const intermediate = await api.load()
-          currentTableRev = intermediate.table?.revision
-        }
-      }
-
-      // 2. 如果路由表改了，保存路由表
-      if (tableDirty && snapshot.table && currentTableRev) {
-        await api.saveTable({ text: yamlText, revision: currentTableRev })
-      }
-
-      // 3. 重新加载最新数据以同步 revision 与 catalog
-      const fresh = await api.load()
-      receive(fresh)
-      setNotice('设置已成功保存并立即生效！后续新建的子代理将自动应用新规则。')
-    } catch (err) {
-      setError(message(err))
+      const result = await saveSettingsDraft(api, snapshot, config, yamlText)
+      setSnapshot(result.snapshot)
+      // A successful table write must not discard a config draft that failed to save.
+      if (result.snapshot.config !== snapshot.config) setConfig(result.snapshot.config)
+      if (result.snapshot.table !== snapshot.table) adoptTable(result.snapshot.table)
+      setRefreshRequired(result.refreshRequired === true)
+      setError(result.error ?? '')
+      setNotice(result.notice ?? '')
     } finally {
       setBusy(null)
     }
   }
 
-  // 放弃全部修改
   const handleDiscardAll = () => {
-    if (snapshot === null) return
+    if (snapshot === null || refreshRequired) return
     receive(snapshot)
-    setEditingTarget(null)
     setError('')
     setNotice('')
   }
@@ -269,9 +281,10 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       setFormError('工作区目录路径不能为空')
       return
     }
+    const isHomeRelative = trimmedPath === '~' || trimmedPath.startsWith('~/') || trimmedPath.startsWith('~\\')
     const isWindowsAbsolute = /^[a-zA-Z]:[/\\]/.test(trimmedPath)
-    if (!trimmedPath.startsWith('/') && !trimmedPath.startsWith('~') && !isWindowsAbsolute) {
-      setFormError('路径必须是绝对路径（例如 /Users/... 或 C:\\...）或以 ~ 开头')
+    if (!trimmedPath.startsWith('/') && !isHomeRelative && !isWindowsAbsolute) {
+      setFormError('路径必须是绝对路径（例如 /Users/... 或 C:\\...）或以 ~/ 开头')
       return
     }
 
@@ -288,8 +301,9 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       return
     }
 
-    // 检查重复路径
-    const duplicate = routes.some((r, i) => i !== editingTarget && r.path === trimmedPath)
+    // 检查重复路径（忽略尾部分隔符差异）
+    const targetKey = pathCompareKey(trimmedPath)
+    const duplicate = routes.some((r, i) => i !== editingTarget && pathCompareKey(r.path) === targetKey)
     if (duplicate) {
       setFormError(`已存在针对目录 "${trimmedPath}" 的规则`)
       return
@@ -301,41 +315,61 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       ...(reasoningEffort ? { reasoningEffort } : {}),
     }
 
-    const nextRoutes = [...routes]
-    if (editingTarget === 'new') {
-      nextRoutes.push(item)
-    } else if (typeof editingTarget === 'number') {
-      nextRoutes[editingTarget] = item
+    if (editingTarget === null) return
+    const index = editingTarget === 'new' ? routes.length : editingTarget
+    try {
+      setYamlText(editRouteYaml(yamlText, { kind: 'route', index, route: item }))
+      const nextRoutes = [...routes]
+      nextRoutes[index] = item
+      setRoutes(nextRoutes)
+      setEditingTarget(null)
+      setFormState(EMPTY_FORM)
+      setFormError('')
+      setError('')
+      setNotice('')
+    } catch (err) {
+      setFormError(message(err))
     }
-
-    syncToYaml(fallback, nextRoutes)
-    setEditingTarget(null)
-    setFormState(EMPTY_FORM)
-    setFormError('')
   }
 
-  // 规则删除
   const handleDeleteRule = (index: number) => {
     const target = routes[index]
     if (!window.confirm(`确定要移除工作区 "${target.path}" 的专属路由规则吗？`)) return
-    const nextRoutes = routes.filter((_, i) => i !== index)
-    syncToYaml(fallback, nextRoutes)
-    if (editingTarget === index) setEditingTarget(null)
+    try {
+      setYamlText(editRouteYaml(yamlText, { kind: 'delete-route', index }))
+      setRoutes(routes.filter((_, i) => i !== index))
+      setError('')
+      setNotice('')
+    } catch (err) {
+      setError(message(err))
+    }
   }
 
-  // 全局兜底模型变更（接收完整三元组，避免部分字段更新时互抹）
   const handleFallbackChange = (next: { provider: string; model: string; reasoningEffort: string }) => {
     const nextFallback: RouteSpec = {
       ...(next.provider ? { provider: next.provider } : {}),
       ...(next.model ? { model: next.model } : {}),
       ...(next.reasoningEffort ? { reasoningEffort: next.reasoningEffort } : {}),
     }
-    syncToYaml(nextFallback, routes)
+    setError('')
+    setNotice('')
+    // Manual inputs are edited one at a time; never write a half-complete pair into the YAML draft.
+    if (Boolean(next.provider) !== Boolean(next.model)) {
+      setFallback(nextFallback)
+      return
+    }
+    try {
+      const spec = next.provider || next.reasoningEffort ? nextFallback : undefined
+      setYamlText(editRouteYaml(yamlText, { kind: 'fallback', spec }))
+      setFallback(nextFallback)
+    } catch (err) {
+      setError(message(err))
+    }
   }
 
   // 加载中视图
   if (snapshot === null || config === null) {
-    return h('div', { className: 'sr-settings', 'aria-busy': true },
+    return h('div', { className: 'sr-settings', 'aria-busy': busy !== null },
       h('style', null, SETTINGS_CSS),
       h('div', { className: 'sr-header' },
         h('div', { className: 'sr-header-info' },
@@ -355,7 +389,8 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     )
   }
 
-  const isBlocked = busy !== null
+  const isBlocked = busy !== null || refreshRequired
+  const tableBlocked = isBlocked || pathDirty || snapshot.table === null
 
   // 头部主开关与标题
   const header = h('header', { className: 'sr-header' },
@@ -384,11 +419,13 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       h('button', {
         type: 'button',
         className: `sr-tab-btn ${viewMode === 'visual' ? 'sr-tab-active' : ''}`,
+        disabled: busy !== null,
         onClick: () => handleSwitchTab('visual'),
       }, '规则设置'),
       h('button', {
         type: 'button',
         className: `sr-tab-btn ${viewMode === 'yaml' ? 'sr-tab-active' : ''}`,
+        disabled: busy !== null,
         onClick: () => handleSwitchTab('yaml'),
       }, '原始 YAML 模式'),
     ),
@@ -417,7 +454,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       h('h4', { className: 'sr-card-title' }, '全局默认策略'),
     ),
     h('p', { className: 'sr-card-desc' },
-      '当会话未单独指定、且当前工作区目录未命中任何专属规则时，子代理的兜底行为。'),
+      '当会话未单独指定时，决定是否应用项目规则和全局兜底。'),
     h('div', { className: 'sr-policy-options', role: 'radiogroup', 'aria-label': '全局默认策略' },
       h('button', {
         type: 'button',
@@ -432,7 +469,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
         },
       },
         h('span', { className: 'sr-policy-name' }, '继承主代理模型'),
-        h('span', { className: 'sr-policy-desc' }, '子代理直接复用主代理的模型与思考等级，不应用下方通用路由配置。'),
+        h('span', { className: 'sr-policy-desc' }, '子代理直接复用主代理的模型与思考等级，不应用项目规则或全局兜底。'),
       ),
       h('button', {
         type: 'button',
@@ -460,15 +497,17 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     h('p', { className: 'sr-card-desc' }, '当子代理所在的工作区没有匹配到下方专属规则时使用。留空则直接继承父会话的模型。'),
     policyInactive ? inactiveNote('policy-fallback') : null,
     h(RouteFields, {
+      key: `fallback-${tableResetKey}`,
       provider: fallback.provider ?? '',
       model: fallback.model ?? '',
       reasoningEffort: fallback.reasoningEffort ?? '',
       catalog: snapshot.catalog,
-      disabled: isBlocked,
+      disabled: tableBlocked,
       allowInherit: true,
       classes: SETTINGS_CLASSES,
-      onChange: next => handleFallbackChange(next),
+      onChange: handleFallbackChange,
     }),
+    fallbackIncomplete ? h('p', { className: 'sr-hint is-warn', role: 'status' }, '提供商与模型须同时填写或同时清空，完成后才会更新 YAML 草稿。') : null,
   )
 
   // 规则编辑表单卡片 (新增 / 编辑)（采用智能联动组件）
@@ -479,16 +518,17 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
         key: `path-${editingTarget}`,
         value: formState.path,
         workspaces: snapshot.workspaces,
-        disabled: isBlocked,
+        disabled: tableBlocked,
         onChange: path => setFormState(current => ({ ...current, path })),
       }),
       h('span', { className: 'sr-hint' }, '子代理在该目录或其子目录中派活时将生效（更长路径优先）。'),
       h(RouteFields, {
+        key: `fields-${editingTarget}`,
         provider: formState.provider,
         model: formState.model,
         reasoningEffort: formState.reasoningEffort,
         catalog: snapshot.catalog,
-        disabled: isBlocked,
+        disabled: tableBlocked,
         allowInherit: true,
         classes: SETTINGS_CLASSES,
         onChange: next => setFormState({
@@ -500,8 +540,8 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       }),
       formError ? h('p', { className: 'sr-error', role: 'alert', style: { margin: 0 } }, formError) : null,
       h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
-        h('button', { type: 'button', className: 'sr-btn sr-btn-primary sr-btn-sm', onClick: handleCommitRule }, '确认保存规则'),
-        h('button', { type: 'button', className: 'sr-btn sr-btn-sm', onClick: () => { setEditingTarget(null); setFormError('') } }, '取消'),
+        h('button', { type: 'button', className: 'sr-btn sr-btn-primary sr-btn-sm', disabled: tableBlocked, onClick: handleCommitRule }, '确认保存规则'),
+        h('button', { type: 'button', className: 'sr-btn sr-btn-sm', disabled: isBlocked, onClick: () => { setEditingTarget(null); setFormError(''); setError('') } }, '取消'),
       ),
     ),
   ) : null
@@ -513,6 +553,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       editingTarget === null && routes.length > 0 ? h('button', {
         type: 'button',
         className: 'sr-btn sr-btn-sm',
+        disabled: tableBlocked,
         onClick: handleStartAdd,
       }, '+ 新增规则') : null,
     ),
@@ -521,7 +562,7 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
     ruleEditorBox,
     routes.length === 0 && editingTarget === null ? h('div', { className: 'sr-empty' },
       h('p', { className: 'sr-empty-text' }, '暂无任何项目规则。子代理将使用全局兜底模型或继承主会话设置。'),
-      h('button', { type: 'button', className: 'sr-btn sr-btn-primary sr-btn-sm', onClick: handleStartAdd }, '+ 添加第一个项目规则'),
+      h('button', { type: 'button', className: 'sr-btn sr-btn-primary sr-btn-sm', disabled: tableBlocked, onClick: handleStartAdd }, '+ 添加第一个项目规则'),
     ) : h('div', { className: 'sr-route-list' },
       routes.map((r, idx) => h('div', { key: `${r.path}-${idx}`, className: `sr-route-item ${editingTarget === idx ? 'sr-route-editing' : ''}` },
         h('div', { className: 'sr-route-main' },
@@ -532,8 +573,8 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
           ),
         ),
         h('div', { className: 'sr-route-actions' },
-          h('button', { type: 'button', className: 'sr-btn sr-btn-sm', disabled: isBlocked || editingTarget !== null, onClick: () => handleStartEdit(idx) }, '编辑'),
-          h('button', { type: 'button', className: 'sr-btn sr-btn-danger sr-btn-sm', disabled: isBlocked || editingTarget !== null, onClick: () => handleDeleteRule(idx) }, '删除'),
+          h('button', { type: 'button', className: 'sr-btn sr-btn-sm', disabled: tableBlocked || editingTarget !== null, onClick: () => handleStartEdit(idx) }, '编辑'),
+          h('button', { type: 'button', className: 'sr-btn sr-btn-danger sr-btn-sm', disabled: tableBlocked || editingTarget !== null, onClick: () => handleDeleteRule(idx) }, '删除'),
         ),
       )),
     ),
@@ -545,14 +586,15 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
       h('h4', { className: 'sr-card-title' }, '原始 YAML 编辑'),
       snapshot.table ? h('span', { className: 'sr-hint', style: { fontFamily: 'ui-monospace' } }, snapshot.table.file) : null,
     ),
-    h('p', { className: 'sr-card-desc' }, '支持直接编辑完整的路由表 YAML 内容，保存时保持结构化规范。修改会与可视化表单双向同步。'),
+    h('p', { className: 'sr-card-desc' }, '直接编辑当前文件的 YAML 草稿。通过解析和结构校验后才能切回可视化模式。'),
+    yamlIssue ? h('p', { className: 'sr-error', role: 'alert' }, yamlIssue) : null,
     h('textarea', {
       className: 'sr-textarea',
       'aria-label': '路由表内容（YAML）',
       value: yamlText,
-      disabled: isBlocked,
+      disabled: tableBlocked,
       spellCheck: false,
-      onChange: (e: { target: { value: string } }) => { setYamlText(e.target.value); setError(''); setNotice('') },
+      onChange: (e: { target: { value: string } }) => { setYamlText(e.target.value); setYamlIssue(''); setError(''); setNotice('') },
     }),
   )
 
@@ -566,29 +608,33 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
             type: 'checkbox',
             checked: config.preflight,
             disabled: isBlocked || !snapshot.canEditConfig,
-            onChange: e => setConfig({ ...config, preflight: e.target.checked }),
+            onChange: e => { setConfig({ ...config, preflight: e.target.checked }); setNotice(''); setError('') },
           }),
           h('span', { style: { fontWeight: 600 } }, '派活前进行模型可用性预检'),
         ),
         h('span', { className: 'sr-hint' }, '创建子代理前调用底层模型接口预先核验 provider、model 和思考等级是否合法可用。'),
       ),
       h('div', { className: 'sr-field' },
-        h('label', null, '自定义路由表存储路径'),
+        h('label', { htmlFor: pathFieldId }, '自定义路由表存储路径'),
         h('input', {
+          id: pathFieldId,
+          'aria-describedby': `${pathFieldId}-hint`,
           type: 'text',
           placeholder: '留空使用默认路径 $DSH_HOME/subagent-routes.yaml',
           value: config.routesFile,
-          disabled: isBlocked || !snapshot.canEditConfig,
-          onChange: e => setConfig({ ...config, routesFile: e.target.value }),
+          disabled: isBlocked || !snapshot.canEditConfig || hasTableDraft,
+          onChange: e => { setConfig({ ...config, routesFile: e.target.value }); setError(''); setNotice('') },
         }),
-        h('span', { className: 'sr-hint' }, '支持以 ~ 开头。修改并保存后，插件将切换至新文件读取规则。'),
+        h('span', { className: 'sr-hint', id: `${pathFieldId}-hint` }, hasTableDraft
+          ? '请先保存或放弃当前文件的规则修改，再切换路径。'
+          : '支持以 ~ 开头。保存路径后会读取新文件，不会复制当前规则。'),
       ),
       !snapshot.canEditConfig ? h('p', { className: 'sr-hint', style: { marginTop: 8 } }, '当前宿主环境不支持修改插件基础配置，高级配置项已锁定。') : null,
     ),
   )
 
   // 底部统一保存条
-  const saveDisabled = isBlocked || !isDirty || editingTarget !== null
+  const saveDisabled = isBlocked || !hasDraft || editingTarget !== null || fallbackIncomplete
   const footerBar = h('div', { className: 'sr-footer-bar' },
     h('div', { className: 'sr-footer-left' },
       h('button', {
@@ -596,34 +642,37 @@ function SettingsEditor({ api }: { api: SettingsApi }): ReactElement {
         className: 'sr-btn sr-btn-primary sr-save-btn',
         disabled: saveDisabled,
         onClick: () => void handleSaveAll(),
-      }, busy === 'saving' ? '正在保存…' : (isDirty ? '保存所有更改' : '已是最新配置')),
+      }, busy === 'saving' ? '正在保存…' : refreshRequired ? '请先重新读取' : hasDraft ? '保存所有更改' : '已是最新配置'),
       h('button', {
         type: 'button',
         className: 'sr-btn',
-        disabled: isBlocked || !isDirty,
+        disabled: isBlocked || !hasDraft,
         onClick: handleDiscardAll,
       }, '放弃修改'),
       h('button', {
         type: 'button',
         className: 'sr-btn',
-        disabled: isBlocked,
+        disabled: busy !== null,
         onClick: () => void reload(),
       }, busy === 'load' ? '读取中…' : '重新读取'),
     ),
     h('div', { className: 'sr-footer-right' },
       editingTarget !== null
         ? h('span', { className: 'sr-dirty-badge' }, '正在编辑单条规则，请先确认保存')
-        : (isDirty ? h('span', { className: 'sr-dirty-badge' }, '● 有未保存的修改') : null),
+        : (hasDraft ? h('span', { className: 'sr-dirty-badge' }, '● 有未保存的修改') : null),
     ),
   )
 
-  return h('div', { className: 'sr-settings', 'aria-busy': isBlocked },
+  return h('div', { className: 'sr-settings', 'aria-busy': busy !== null },
     h('style', null, SETTINGS_CSS),
     header,
     navRow,
     error ? h('div', { className: 'sr-error', role: 'alert' }, error) : null,
     notice ? h('div', { className: 'sr-notice', role: 'status' }, notice) : null,
-    viewMode === 'visual' ? h('div', null, policyCard, fallbackCard, routesCard) : yamlCard,
+    snapshot.tableError ? h('p', { className: 'sr-error', role: 'alert' }, snapshot.tableError) : null,
+    pathDirty ? h('p', { className: 'sr-hint is-warn', role: 'status' }, '已修改路由表路径。保存或放弃路径修改后，才能继续编辑规则。') : null,
+    snapshot.table?.exists === false ? h('p', { className: 'sr-hint' }, '尚未创建路由表。保存规则时将创建该文件。') : null,
+    viewMode === 'visual' ? h('div', null, policyCard, snapshot.table && fallbackCard, snapshot.table && routesCard) : yamlCard,
     advancedDetails,
     footerBar,
   )

@@ -3,7 +3,6 @@ import {
   SETTINGS_PATH,
   type PluginConfig,
   type RouteSpec,
-  type SaveSessionSelection,
   type SaveTableSettings,
   type SessionMode,
   type SessionSnapshot,

@@ -15,6 +15,7 @@ export interface PopoverStore {
   close(sessionId?: string, options?: { restoreFocus?: boolean }): void
   toggle(sessionId: string, trigger?: HTMLElement | null): void
   getTrigger(sessionId: string): HTMLElement | null
+  unregisterTrigger(sessionId: string, trigger?: HTMLElement | null): void
   subscribe(listener: () => void): () => void
 }
 
@@ -47,6 +48,9 @@ class SessionPopoverStore implements PopoverStore {
 
     const closingSession = this.openedId
     const trigger = this.triggers.get(closingSession)
+    if (trigger !== undefined && trigger.isConnected === false) {
+      this.triggers.delete(closingSession)
+    }
     this.openedId = null
     this.notify()
 
@@ -78,6 +82,14 @@ class SessionPopoverStore implements PopoverStore {
 
   getTrigger(sessionId: string): HTMLElement | null {
     return this.triggers.get(sessionId) ?? null
+  }
+
+  unregisterTrigger(sessionId: string, trigger?: HTMLElement | null): void {
+    const current = this.triggers.get(sessionId)
+    if (current === undefined) return
+    if (trigger === undefined || trigger === null || current === trigger) {
+      this.triggers.delete(sessionId)
+    }
   }
 
   subscribe(listener: () => void): () => void {

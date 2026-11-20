@@ -266,10 +266,11 @@ routes:
 | `routesFile` | `$DSH_HOME/subagent-routes.yaml` | 路由表路径；留空用默认位置 |
 | `enabled` | `true` | 路由注入开关；`false` 时停止注入，设置入口仍保留 |
 | `preflight` | `true` | 注入前用 `llm.resolveCallConfig` 校验路由；关掉则把错误留到子会话首轮 |
-| `fallbackPolicy` | `rules` | `inherit` = 没有更具体来源时继承主代理模型；`rules` = 按路由表注入 |
+| `fallbackPolicy` | `rules` | `inherit` = 无会话指定时跳过项目规则和兜底、继承主代理；`rules` = 按路由表注入 |
 
 这四项在设置页里分别对应「已启用 / 已暂停」开关、「全局默认策略」卡片与折叠的「高级选项」，
-改完点底部「保存所有更改」即可，无需手工编辑 profile。
+改完点底部「保存所有更改」即可，无需手工编辑 profile。切换路由表路径前须保存或放弃
+当前文件的草稿；保存新路径会读取新文件，不会拷贝或覆盖那里的规则。
 `fallbackPolicy` 写了未知值时按 `rules` 处理，并在日志里保持可解释，不会让派活路径静默走错策略。
 
 ---
@@ -312,7 +313,12 @@ subagent-routes: /Users/you/Code/frontend-app → anthropic/claude-sonnet-4 @hig
 - **「继承主代理」不能固化**：继承没有可写入路由表的 provider / model，因此该状态下
   「固化为项目规则」按钮会置灰。
 - **固化会覆盖同目录规则**：把当前会话固化到某个目录时，该目录已有的条目会被替换，
-  不会追加成第二条。
+  不会追加成第二条；不会重建无关规则。全局策略为「继承主代理」时须先改为
+  「使用路由规则」，否则固化会被拒绝，原会话指定会保留。
+- **YAML 与可视化共用结构校验**：语法或结构错误保留在 YAML 草稿中，不会静默转换。
+  可视化编辑只更新目标节点，保留无关规则的值和注释。
+- **后端能力决定是否注入**：仅在派活后端声明支持 `agentOptions` 时注入；不支持或
+  无法查询能力时，保留 DSH 原始派活行为。
 - 需要 `@deepseek-ai/cordis` 的 `symbols.original` 取回真实服务实例；若未来 cordis
   改变服务包装方式，这里需要同步（代码中有明确断言与告警）。
 
@@ -336,22 +342,25 @@ src/
   shared/          # 两侧共享的契约与 YAML 工具
 tests/             # 与 src 对应的单元/集成测试
 scripts/
-  verify-settings.mjs              # 设置页隔离验收：几何、对比度、键盘焦点、状态机
+  verify-settings.mjs              # 设置页隔离验收：YAML 保值、路径互斥、部分保存、错误恢复与尺寸
   verify-popover.mjs               # 输入区浮层验收：定位、三态提交、焦点、对比度、极端宽度
   verify-policy.mjs                # 设置页全局默认策略验收：失效提示、脏态、保存载荷
   capture-readme-screenshots.mjs   # 生成本 README 的截图
 ```
 
-两张验收脚本都在隔离浏览器里加载**已构建的** `lib/client.js`，所有宿主接口由
-内存 mock 提供，不接触真实 profile：
+验收脚本在隔离浏览器里加载**已构建的** `lib/client.js`，所有宿主接口由
+内存 mock 提供，不接触真实 profile。需要本机已有 Playwright 及其浏览器：
 
 ```sh
 pnpm run check
-NODE_PATH=/opt/homebrew/lib/node_modules node scripts/verify-settings.mjs
-node scripts/verify-popover.mjs      # 需要全局安装 playwright
-node scripts/verify-policy.mjs       # 同上
-NODE_PATH=/opt/homebrew/lib/node_modules node scripts/capture-readme-screenshots.mjs
+node scripts/verify-settings.mjs
+node scripts/verify-popover.mjs
+node scripts/verify-policy.mjs
+node scripts/capture-readme-screenshots.mjs
 ```
+
+Playwright 位于项目外时，可用 `PLAYWRIGHT_MODULE` 指定其入口文件的绝对路径；
+可用 `CHROME_PATH` 指定本机已安装的 Chrome，无需下载测试浏览器。
 
 ---
 

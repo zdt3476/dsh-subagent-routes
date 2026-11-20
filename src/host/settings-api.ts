@@ -53,8 +53,7 @@ export async function buildCatalogFromLlm(llm?: LlmCatalogService): Promise<Cata
   if (!llm || typeof llm.listProviders !== 'function') return undefined
   try {
     const providers = llm.listProviders()
-    const groups: CatalogProviderGroup[] = []
-    for (const p of providers) {
+    const resolved = await Promise.all(providers.map(async (p): Promise<CatalogProviderGroup | undefined> => {
       try {
         const models = typeof llm.listModels === 'function' ? await llm.listModels(p.id) : []
         const entries = await Promise.all(models.map(async (m): Promise<CatalogModel> => {
@@ -74,11 +73,13 @@ export async function buildCatalogFromLlm(llm?: LlmCatalogService): Promise<Cata
           }
           return { id: m.id, name: m.name, description: m.description, reasoning }
         }))
-        groups.push({ id: p.id, name: p.name, models: entries })
+        return { id: p.id, name: p.name, models: entries }
       } catch {
         // 单个 provider 失败不影响其他 provider
+        return undefined
       }
-    }
+    }))
+    const groups = resolved.filter((group): group is CatalogProviderGroup => group !== undefined)
     return groups.length > 0 ? groups : undefined
   } catch {
     return undefined

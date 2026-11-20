@@ -124,7 +124,7 @@ const DEMO_WORKSPACES = [
 ]
 
 const snapshot = {
-  config: { routesFile: '', enabled: true, preflight: true },
+  config: { routesFile: '', enabled: true, preflight: true, fallbackPolicy: 'rules' },
   configRevision: 'demo-config',
   canEditConfig: true,
   table: {
@@ -138,7 +138,7 @@ const snapshot = {
   workspaces: DEMO_WORKSPACES,
 }
 
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const context = await browser.newContext({
   viewport: { width: 1000, height: 1200 },
   deviceScaleFactor: 2,
@@ -167,6 +167,8 @@ try {
   page.on('pageerror', error => { throw new Error(`浏览器运行时错误：${error}`) })
 
   await page.goto('http://settings.test/fixture')
+  await page.waitForFunction(() => typeof window.__SR_MOUNT_SETTINGS__ === 'function')
+  await page.evaluate(() => window.__SR_MOUNT_SETTINGS__('mount'))
   await page.getByRole('heading', { name: '子代理工作区路由' }).waitFor()
   await page.addStyleTag({
     content: [
@@ -195,7 +197,7 @@ try {
 
   // 模型选择器联动特写：全局兜底卡片
   await page.evaluate(() => document.documentElement.removeAttribute('data-ds-dark-theme'))
-  const fallbackCard = page.locator('.sr-card').first()
+  const fallbackCard = page.locator('.sr-card').filter({ has: page.getByRole('heading', { name: '全局默认模型（未匹配项目时使用）' }) })
   await fallbackCard.screenshot({ path: `${output}/fallback-card.png`, animations: 'disabled' })
   console.log('captured fallback-card.png')
 

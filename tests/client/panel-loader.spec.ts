@@ -68,6 +68,24 @@ describe('侧栏面板读取时序', () => {
     expect(h.snaps).toEqual(['new'])
   })
 
+  it('连续发起两次非静默读取时，旧请求先结束不会提前触发 onSettled', async () => {
+    const { api, resolve } = deferredApi()
+    const h = handlers()
+    const loader = createSessionLoader(api, 's1', () => h)
+
+    const first = loader.load()
+    const second = loader.load()
+    resolve(0, snapshot('old'))
+    await first
+    expect(h.settled).toBe(0)
+    expect(h.snaps).toEqual([])
+
+    resolve(1, snapshot('new'))
+    await second
+    expect(h.settled).toBe(1)
+    expect(h.snaps).toEqual(['new'])
+  })
+
   it('静默同步不进入加载态，也不复位忙碌中的按钮', async () => {
     const { api, resolve } = deferredApi()
     const h = handlers()

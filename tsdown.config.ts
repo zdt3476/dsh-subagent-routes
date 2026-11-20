@@ -61,7 +61,10 @@ export default defineConfig([
     sourcemap: true,
     dts: false,
     clean: false,
-    deps: { neverBundle: isProductionDependency },
+    deps: {
+      neverBundle: specifier => !/^yaml(?:\/|$)/.test(specifier) && isProductionDependency(specifier),
+      alwaysBundle: [/^yaml(?:\/|$)/],
+    },
     outputOptions: {
       entryFileNames: 'client.js',
       comments: OUTPUT_COMMENTS,

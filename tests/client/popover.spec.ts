@@ -100,6 +100,22 @@ describe('popoverStore 状态管理', () => {
     popoverStore.close('s1', { restoreFocus: false })
     expect(focusSpy).not.toHaveBeenCalled()
   })
+
+  it('unregisterTrigger 仅注销匹配节点，close 时清理已脱离 DOM 的旧触发器', () => {
+    const triggerA = { focus: vi.fn(), isConnected: true } as unknown as HTMLElement
+    const triggerB = { focus: vi.fn(), isConnected: false } as unknown as HTMLElement
+
+    popoverStore.open('s1', triggerA)
+    popoverStore.unregisterTrigger('s1', triggerB)
+    expect(popoverStore.getTrigger('s1')).toBe(triggerA)
+
+    popoverStore.unregisterTrigger('s1', triggerA)
+    expect(popoverStore.getTrigger('s1')).toBeNull()
+
+    popoverStore.open('s2', triggerB)
+    popoverStore.close('s2', { restoreFocus: false })
+    expect(popoverStore.getTrigger('s2')).toBeNull()
+  })
 })
 
 describe('RoutePopover 渲染', () => {

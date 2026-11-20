@@ -75,8 +75,8 @@ export function createSessionLoader(
       if (token !== generation || mine !== ticket) return
       if (!silent) handlers().onError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      // 静默同步不该复位忙碌态：它本来就没把界面切进加载中。
-      if (token === generation && !silent) handlers().onSettled()
+      // 静默同步不该复位忙碌态；已被新读取取代的旧请求也不应提前结束加载态。
+      if (token === generation && mine === ticket && !silent) handlers().onSettled()
     }
   }
 

@@ -1,12 +1,10 @@
 /**
- * 右侧栏与就地浮层控制台面板：看清「这个会话接下来派出的子代理会用哪套配置」，并当场改掉它。
+ * 右侧栏控制台面板：看清「这个会话接下来派出的子代理会用哪套配置」，并当场改掉它。
  *
  * 面板核心职责：
  * 1. 现在生效的是什么（以及为什么是它——会话指定 / 项目规则 / 全局兜底 / 继承主代理）；
  * 2. 想换成什么（三态：跟随全局策略 / 强制继承主代理 / 指定一套）；
  * 3. 改完能不能沉淀下来（固化为项目规则）。
- *
- * 两种形态（sidebar 与 popover）共用同一个组件，通过 variant 区分样式修饰与关闭按钮。
  */
 
 import { createElement as h, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
@@ -52,11 +50,13 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  // 切会话时递增代次，丢弃迟到的写操作响应
-  const generation = useRef(0)
 
   const adopt = useCallback((next: SessionSnapshot) => {
-    setSnapshot(next)
+    setSnapshot(previous =>
+      next.catalog === undefined && previous?.catalog !== undefined && previous.sessionId === next.sessionId
+        ? { ...next, catalog: previous.catalog }
+        : next,
+    )
     setMode(next.mode)
     const customSpec = next.session?.mode === 'custom' ? next.session : undefined
     setDraft({
@@ -94,7 +94,6 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
     return () => {
       unsubscribe()
       instance.invalidate()
-      generation.current += 1
       loader.current = null
     }
   }, [api, adopt, sessionId])
@@ -132,28 +131,32 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
   }
 
   const handleSave = async (): Promise<void> => {
-    const token = ++generation.current
+    let override: RouteSpec | null = null
+    if (mode === 'custom') {
+      const provider = draft.provider.trim()
+      const model = draft.model.trim()
+      const reasoningEffort = draft.reasoningEffort.trim()
+      if (provider === '' || model === '') {
+        setNotice('')
+        setError('请选择完整的提供商与模型；只指定思考等级会覆盖项目规则里的模型')
+        reveal('.srp-status.is-error')
+        return
+      }
+      override = {
+        provider,
+        model,
+        ...(reasoningEffort === '' ? {} : { reasoningEffort }),
+      }
+    }
+    const currentLoader = loader.current
+    const token = currentLoader?.invalidate()
+    const isActive = (): boolean => currentLoader === null || token === undefined || currentLoader.isCurrent(token)
     setBusy('save')
     setError('')
     setNotice('')
     try {
-      let override: RouteSpec | null = null
-      if (mode === 'custom') {
-        const provider = draft.provider.trim()
-        const model = draft.model.trim()
-        const reasoningEffort = draft.reasoningEffort.trim()
-        if (provider === '' || model === '') {
-          setError('请选择完整的提供商与模型；只指定思考等级会覆盖项目规则里的模型')
-          return
-        }
-        override = {
-          provider,
-          model,
-          ...(reasoningEffort === '' ? {} : { reasoningEffort }),
-        }
-      }
       const next = await api.save(sessionId, { mode, override })
-      if (token !== generation.current) return
+      if (!isActive()) return
       adopt(next)
       if (mode === 'follow') {
         setNotice('已恢复跟随全局策略')
@@ -163,29 +166,34 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
         setNotice('已生效：下一次派活开始使用新配置')
       }
     } catch (cause) {
-      if (token === generation.current) {
+      if (isActive()) {
         setError(cause instanceof Error ? cause.message : String(cause))
         reveal('.srp-status.is-error')
       }
     } finally {
-      if (token === generation.current) setBusy(null)
+      if (isActive()) setBusy(null)
     }
   }
 
   const handleFreeze = async (): Promise<void> => {
-    const token = ++generation.current
+    const currentLoader = loader.current
+    const token = currentLoader?.invalidate()
+    const isActive = (): boolean => currentLoader === null || token === undefined || currentLoader.isCurrent(token)
     setBusy('freeze')
     setError('')
     setNotice('')
     try {
       const next = await api.freeze(sessionId)
-      if (token !== generation.current) return
+      if (!isActive()) return
       adopt(next)
       setNotice('已写入项目规则，并清除了本会话的临时指定')
     } catch (cause) {
-      if (token === generation.current) setError(cause instanceof Error ? cause.message : String(cause))
+      if (isActive()) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+        reveal('.srp-status.is-error')
+      }
     } finally {
-      if (token === generation.current) setBusy(null)
+      if (isActive()) setBusy(null)
     }
   }
 
@@ -220,7 +228,10 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
   // 只有本会话真的改过才用「已指定」的强调态；follow 与没配过必须一致。
   const isSessionOverride = snapshot.session !== undefined
   const disabled = busy !== null || locked
-  const canFreeze = snapshot.session?.mode === 'custom'
+  const freezeBlocked = snapshot.defaultPolicy === 'inherit'
+    ? '全局策略为继承主代理，请先在设置页改为「使用路由规则」再固化。'
+    : undefined
+  const canFreeze = snapshot.session?.mode === 'custom' && freezeBlocked === undefined
 
   // 左侧（或上方）：当前生效与环境状态
   const summaryBlock = h('div', { className: `srp-now${isSessionOverride ? ' is-session' : ''}` },
@@ -305,10 +316,9 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
           reasoningEffort: draft.reasoningEffort,
           catalog: snapshot.catalog,
           disabled,
-          allowInherit: true,
+          allowInherit: false,
           allowManual: false,
           classes: PANEL_CLASSES,
-          labels: { manual: '手动输入' },
           onChange: next => {
             setDraft(next)
             setNotice('')
@@ -323,7 +333,9 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
               ? (snapshot.defaultPolicy === 'inherit'
                   ? '全局策略为继承主代理，当前没有指定本会话配置。'
                   : '当前目录未命中项目规则，子代理将使用全局兜底配置或主模型。')
-              : `命中项目规则：${describe(snapshot.workspace.spec)}`),
+              : snapshot.workspace.path === undefined
+                ? `使用全局兜底：${describe(snapshot.workspace.spec)}`
+                : `命中项目规则：${describe(snapshot.workspace.spec)}`),
 
   )
 
@@ -346,7 +358,7 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
         type: 'button',
         className: 'srp-btn',
         disabled: disabled || !canFreeze,
-        title: canFreeze ? '把本会话的指定写进项目路由规则' : '当前未自定义指定一套模型，无法固化',
+        title: freezeBlocked ?? (canFreeze ? '把本会话的指定写进项目路由规则' : '当前未自定义指定一套模型，无法固化'),
         onClick: () => void handleFreeze(),
       }, busy === 'freeze' ? '固化中…' : '固化为项目规则'),
       h('button', {
@@ -357,6 +369,9 @@ export function RoutePanel({ sessionId, api = sessionApi }: RoutePanelProps): Re
       }, busy === 'load' ? '读取中…' : '刷新'),
     ),
 
+    freezeBlocked && snapshot.session?.mode === 'custom'
+      ? h('p', { className: 'srp-hint is-warn', style: { margin: 0 } }, freezeBlocked)
+      : null,
     error ? h('p', { className: 'srp-status is-error', role: 'alert' }, error) : null,
     notice ? h('p', { className: 'srp-status', role: 'status' }, notice) : null,
   )

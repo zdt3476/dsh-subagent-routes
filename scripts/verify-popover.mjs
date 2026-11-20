@@ -101,7 +101,7 @@ let rejectSave = false
 
 const report = { scope: 'isolated built lib/client.js; mocked host API; no production profile', checks: [], geometry: [], screenshots: [] }
 
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 let context
 let freshContext
 
@@ -134,7 +134,9 @@ try {
         delete next.workspace
       }
       snapshot = next
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(snapshot) })
+      // 与真实 Host 的 PUT 契约一致：写接口不重复返回 catalog，由客户端保留已有目录。
+      const { catalog: _omitted, ...putResponse } = snapshot
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(putResponse) })
     }
     if (url.pathname === '/fixture') return route.fulfill({ contentType: 'text/html', body: fixtureHtml })
     if (url.pathname === '/lib/client.js') {

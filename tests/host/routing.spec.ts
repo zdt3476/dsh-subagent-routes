@@ -128,7 +128,13 @@ describe('resolveDirectory', () => {
     expect(resolveDirectory(request('sub/dir'), { get: () => '/project/current' })).toBe('/project/current/sub/dir')
   })
 
-  it('拿不到目录时返回 undefined', () => {
+  it('拿不到目录或目录为空白时返回 undefined', () => {
     expect(resolveDirectory(request(undefined, undefined), undefined)).toBeUndefined()
+    expect(resolveDirectory(request(undefined, '   '), undefined)).toBeUndefined()
+  })
+
+  it('规范化尾斜杠与相对段，保持与路由表路径同口径', () => {
+    expect(resolveDirectory(request(undefined, '/project/a/../current/'), undefined)).toBe('/project/current')
+    expect(resolveDirectory(request(undefined, '/project/original'), { get: () => '/project/current/' })).toBe('/project/current')
   })
 })

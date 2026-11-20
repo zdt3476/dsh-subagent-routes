@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -120,5 +120,28 @@ describe('OverrideStore', () => {
     const { store: s, file } = store()
     writeFileSync(file, JSON.stringify({ version: 1, sessions: [] }))
     expect(s.read()).toEqual({})
+  })
+
+  it('原型属性名作为 sessionId 时不会误命中或污染原型链', () => {
+    const { store: s } = store()
+    for (const key of ['toString', 'constructor', '__proto__']) {
+      expect(s.get(key)).toBeUndefined()
+    }
+    s.set('__proto__', { mode: 'inherit' })
+    s.set('constructor', { mode: 'custom', provider: 'p', model: 'm' })
+    expect(s.get('__proto__')).toEqual({ mode: 'inherit' })
+    expect(s.get('constructor')).toEqual({ mode: 'custom', provider: 'p', model: 'm' })
+    expect(s.get('toString')).toBeUndefined()
+    expect(({} as { mode?: unknown }).mode).toBeUndefined()
+  })
+
+  it('目标路径为符号链接时拒绝写入覆盖', () => {
+    const { store: s, file } = store()
+    const target = join(file, '..', 'real.json')
+    writeFileSync(target, '{"version":2,"sessions":{}}\n')
+    symlinkSync(target, file)
+    expect(() => s.set('s1', { mode: 'inherit' })).toThrow(/符号链接/)
+    expect(lstatSync(file).isSymbolicLink()).toBe(true)
+    expect(readFileSync(target, 'utf8')).toBe('{"version":2,"sessions":{}}\n')
   })
 })

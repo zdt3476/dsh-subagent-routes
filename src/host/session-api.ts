@@ -14,12 +14,11 @@ import {
   type SessionSnapshot,
 } from '../shared/settings'
 import { normalizeSessionRecord, resolveEffective, type SessionRecord } from '../shared/overrides'
-import type { RouteSpec } from '../shared/yaml-utils'
+import { editRouteYaml, RouteYamlError, type RouteSpec } from '../shared/yaml-utils'
 import { resolveConfig } from './config'
 import { OverrideStore, routeOf } from './overrides'
-import { loadRouteTable, matchRouteWithPath, RouteTableError } from './routes'
+import { loadRouteTable, matchRouteWithPath, normalizeDirectory, normalizePath, parseRouteTable, RouteTableError } from './routes'
 import { readTableSettings, saveTableSettings, SettingsError } from './settings'
-import { serializeRouteTable } from '../shared/yaml-utils'
 
 /** 会话元信息读取面：本插件只需要 id 对应的当前目录。 */
 export interface SessionLookup {
@@ -111,7 +110,7 @@ export function buildSessionSnapshot(
 ): SessionSnapshot {
   const config = resolveConfig(options.rawConfig)
   const session = options.store.get(sessionId)
-  const directory = options.lookup?.directory(sessionId)
+  const directory = normalizeDirectory(options.lookup?.directory(sessionId))
 
   let workspace: SessionSnapshot['workspace']
   let tableAvailable = true
@@ -190,7 +189,7 @@ export function createSessionHandler(options: SessionHandlerOptions): (request: 
       throw new SettingsError('请求参数只接受 action=save 或 action=freeze')
     } catch (error) {
       if (error instanceof SettingsError) return json({ error: error.message }, error.status)
-      if (error instanceof RouteTableError) return json({ error: error.message }, 400)
+      if (error instanceof RouteTableError || error instanceof RouteYamlError) return json({ error: error.message }, 400)
       warn(`subagent-routes: 会话设置读写失败：${String(error)}`)
       return json({ error: '读取或保存会话设置失败，请查看 DSH 日志' }, 500)
     }
@@ -238,16 +237,21 @@ function freezeToWorkspace(
   if (override === undefined) throw new SettingsError('当前会话没有临时指定，无法固化为项目规则')
 
   const config = resolveConfig(options.rawConfig)
+  if (config.fallbackPolicy === 'inherit') {
+    throw new SettingsError('全局策略为「继承主代理模型」，项目规则不会生效；请先切换为「使用路由规则」再固化。会话指定已保留')
+  }
   const explicitPath = payload.path
   if (explicitPath !== undefined && typeof explicitPath !== 'string') {
     throw new SettingsError('path 必须是字符串')
   }
-  const path = (typeof explicitPath === 'string' ? explicitPath.trim() : '') ||
-    options.lookup?.directory(sessionId)
-  if (path === undefined || path === '') {
-    throw new SettingsError('无法确定会话所在目录，请在请求中显式提供 path')
+  const directory = options.lookup?.directory(sessionId)
+  if (directory === undefined || directory.trim() === '') {
+    throw new SettingsError('无法确认会话当前目录，不能保证固化后仍使用同一配置；会话指定已保留')
   }
-  if (path.length > MAX_PATH_LENGTH) throw new SettingsError('path 过长', 413)
+  const currentDirectory = normalizePath(directory)
+  const target = (typeof explicitPath === 'string' ? explicitPath.trim() : '') || currentDirectory
+  if (target.length > MAX_PATH_LENGTH) throw new SettingsError('path 过长', 413)
+  const path = normalizePath(target)
 
   const current = readTableSettings(config.routesFile)
   if (current.validationError !== undefined) {
@@ -255,18 +259,21 @@ function freezeToWorkspace(
     throw new SettingsError(`路由表当前无法解析，请先修复后再固化：${current.validationError}`)
   }
 
-  const nextRoutes = [...(current.parsed?.routes ?? [])]
-  const existing = nextRoutes.findIndex(route => route.path === path)
+  const routes = current.parsed?.routes ?? []
+  const existing = routes.findIndex(route => route.path === path)
   const entry = {
     path,
     ...(override.provider === undefined ? {} : { provider: override.provider }),
     ...(override.model === undefined ? {} : { model: override.model }),
     ...(override.reasoningEffort === undefined ? {} : { reasoningEffort: override.reasoningEffort }),
   }
-  if (existing >= 0) nextRoutes[existing] = entry
-  else nextRoutes.push(entry)
-
-  const text = serializeRouteTable(current.parsed?.fallback, nextRoutes)
+  const text = editRouteYaml(current.text, { kind: 'route', index: existing < 0 ? routes.length : existing, route: entry })
+  const table = parseRouteTable(text)
+  const workspace = matchRouteWithPath(table, currentDirectory)
+  const next = resolveEffective({ ...(workspace === undefined ? {} : { workspace }), defaultPolicy: config.fallbackPolicy })?.spec
+  if (next === undefined || next.provider !== override.provider || next.model !== override.model || next.reasoningEffort !== override.reasoningEffort) {
+    throw new SettingsError('固化到该目录后，当前会话将命中其他规则或继承主代理，不能清除现有指定；请改用当前目录固化。会话指定已保留')
+  }
   saveTableSettings(config.routesFile, { text, revision: current.revision })
   // 规则已经承载同一效果，会话选择到此为止。
   options.store.set(sessionId, undefined)

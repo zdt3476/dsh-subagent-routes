@@ -101,6 +101,22 @@ describe('设置 API', () => {
     expect((await pending).status).toBe(409)
   })
 
+  it('切换完成后，旧文件的 revision 不能保存到内容相同的新文件', async () => {
+    const h = harness()
+    const text = 'routes: []\n'
+    const newFile = join(directory, 'new.yaml')
+    writeFileSync(file, text)
+    writeFileSync(newFile, text)
+    const before = await (await h.request()).json()
+    h.entry.options.config.routesFile = newFile
+    const response = await h.request('PUT', {
+      kind: 'table', text: '# 未保存的旧文件草稿\nroutes: []\n', revision: before.table.revision,
+    })
+    expect(response.status).toBe(409)
+    expect(readFileSync(file, 'utf8')).toBe(text)
+    expect(readFileSync(newFile, 'utf8')).toBe(text)
+  })
+
   it('缺少 configEditor 时仍能读取和编辑路由表，但不能假保存基础配置', async () => {
     const handler = createSettingsHandler({ routesFile: file }, undefined, vi.fn())
     const response = await handler(new Request(`http://localhost${SETTINGS_PATH}`))
@@ -212,6 +228,34 @@ describe('设置 API', () => {
     const response = await handler(new Request(`http://localhost${SETTINGS_PATH}`))
     const body = await response.json()
     expect(body.catalog).toEqual(catalog)
+  })
+
+  it('多 Provider 目录并行拉取，单 Provider 失败不影响其余 Provider 且顺序稳定', async () => {
+    const started: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    const mockLlm = {
+      listProviders: () => [
+        { id: 'slow', name: 'Slow' },
+        { id: 'broken', name: 'Broken' },
+        { id: 'fast', name: 'Fast' },
+      ],
+      listModels: async (providerId: string) => {
+        started.push(providerId)
+        if (providerId === 'slow') {
+          await firstGate
+          return [{ id: 'slow-1', name: 'Slow 1' }]
+        }
+        if (providerId === 'broken') throw new Error('boom')
+        // 确认不是等 slow 完成才开始调用 fast
+        releaseFirst()
+        return [{ id: 'fast-1', name: 'Fast 1' }]
+      },
+    }
+    const { buildCatalogFromLlm } = await import('../../src/host/settings-api')
+    const catalog = await buildCatalogFromLlm(mockLlm)
+    expect(started).toEqual(['slow', 'broken', 'fast'])
+    expect(catalog?.map(group => group.id)).toEqual(['slow', 'fast'])
   })
 
   it('读取设置时携带宿主已登记的工作区，供设置页挑选目录', async () => {

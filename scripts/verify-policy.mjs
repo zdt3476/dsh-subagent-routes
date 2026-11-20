@@ -13,14 +13,14 @@ const out = resolve('artifacts/settings')
 await mkdir(out, { recursive: true })
 const server = await createServer({ root: process.cwd(), configFile: false, server: { middlewareMode: true } })
 const html = '<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="mount"></div><script type="module" src="/tests/client/browser-fixture.ts"></script></body></html>'
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const ctx = await browser.newContext({ viewport: { width: 1000, height: 1400 } })
 let policy = 'rules'
 const makeSnap = () => ({
   config: { routesFile: '', enabled: true, preflight: true, fallbackPolicy: policy },
   configRevision: 'c1', canEditConfig: true,
   table: { file: '/Users/you/.dsh/subagent-routes.yaml', exists: true, revision: 't1',
-    text: 'default:\n  provider: acme-frontend\n  model: acme-coder-2\nrules: []\n',
+    text: 'default:\n  provider: acme-frontend\n  model: acme-coder-2\nroutes: []\n',
     parsed: { fallback: { provider: 'acme-frontend', model: 'acme-coder-2' }, routes: [] } },
   catalog: [{ id: 'acme-frontend', name: 'Acme Frontend', models: [
     { id: 'acme-coder-2', name: 'Acme Coder 2', reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高' }], defaultEffort: 'high' } },

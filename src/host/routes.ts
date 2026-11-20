@@ -8,19 +8,9 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, resolve, sep } from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import { parseRouteYaml, RouteYamlError, type RouteSpec, type WorkspaceRoute } from '../shared/yaml-utils'
 
-/** 要注入子代理的 LLM 选项；至少有一个字段。 */
-export interface RouteSpec {
-  readonly provider?: string
-  readonly model?: string
-  readonly reasoningEffort?: string
-}
-
-/** 绑定到具体目录的路由条目。 */
-export interface WorkspaceRoute extends RouteSpec {
-  readonly path: string
-}
+export type { RouteSpec, WorkspaceRoute } from '../shared/yaml-utils'
 
 /** 解析后的路由表：全局兜底与按目录匹配的条目分开保存。 */
 export interface RouteTable {
@@ -51,80 +41,27 @@ export function normalizePath(raw: string, home: string = homedir()): string {
   return resolve(expanded)
 }
 
-function optionalText(source: Record<string, unknown>, key: string, context: string): string | undefined {
-  if (!Object.hasOwn(source, key)) return undefined
-  const value = source[key]
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new RouteTableError(`${context} 的 ${key} 必须是非空字符串`)
-  }
-  return value.trim()
+/** 宽容规范化运行期工作目录：绝对路径或 ~ 前缀按统一口径规范化，空白视为缺失，不抛错。 */
+export function normalizeDirectory(raw: string | undefined, home: string = homedir()): string | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  const homeRelative = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith(`~${sep}`)
+  if (homeRelative || isAbsolute(trimmed)) return normalizePath(trimmed, home)
+  return trimmed
 }
 
-/** 解析一份不含 path 的路由规格，并做字段组合校验。 */
-function parseSpec(source: Record<string, unknown>, context: string): RouteSpec {
-  const provider = optionalText(source, 'provider', context)
-  const model = optionalText(source, 'model', context)
-  const reasoningEffort = optionalText(source, 'reasoningEffort', context)
-  if ((provider === undefined) !== (model === undefined)) {
-    throw new RouteTableError(`${context} 的 provider 与 model 必须同时出现或同时省略`)
-  }
-  if (provider === undefined && reasoningEffort === undefined) {
-    throw new RouteTableError(`${context} 至少要指定 provider/model 或 reasoningEffort`)
-  }
-  return {
-    ...(provider === undefined ? {} : { provider }),
-    ...(model === undefined ? {} : { model }),
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-  }
-}
-
-function asRecord(source: unknown, context: string): Record<string, unknown> {
-  if (typeof source !== 'object' || source === null || Array.isArray(source)) {
-    throw new RouteTableError(`${context} 必须是对象`)
-  }
-  return source as Record<string, unknown>
-}
-
-function rejectUnknownKeys(record: Record<string, unknown>, allowed: readonly string[], context: string): void {
-  const unknown = Object.keys(record).find(key => !allowed.includes(key))
-  if (unknown !== undefined) throw new RouteTableError(`${context} 含未知字段 "${unknown}"，只接受 ${allowed.join('/')}`)
-}
-
-/** 把路由表的原始 YAML 文本解析成校验过的表；空文本返回空表。 */
+/** 共享 YAML 校验后，使用 Host 的原生路径规则完成规范化和查重。 */
 export function parseRouteTable(text: string, home: string = homedir()): RouteTable {
-  if (text.trim() === '') return EMPTY_TABLE
-  let document: unknown
   try {
-    document = parseYaml(text)
+    const { fallback, routes } = parseRouteYaml(text)
+    const normalized = routes.map(route => ({ ...route, path: normalizePath(route.path, home) }))
+    assertNoDuplicates(normalized)
+    return { fallback, routes: normalized }
   } catch (error) {
-    throw new RouteTableError(`路由表不是合法 YAML：${error instanceof Error ? error.message : String(error)}`)
+    if (error instanceof RouteYamlError) throw new RouteTableError(error.message)
+    throw error
   }
-  if (document === null || document === undefined) return EMPTY_TABLE
-  const root = asRecord(document, '路由表根节点')
-  rejectUnknownKeys(root, ['default', 'routes'], '路由表根节点')
-
-  const rawDefault = root['default']
-  let fallback: RouteSpec | undefined
-  if (rawDefault !== undefined && rawDefault !== null) {
-    const record = asRecord(rawDefault, 'default')
-    rejectUnknownKeys(record, ['provider', 'model', 'reasoningEffort'], 'default')
-    fallback = parseSpec(record, 'default')
-  }
-
-  const rawRoutes = root['routes']
-  if (rawRoutes === undefined || rawRoutes === null) return { fallback, routes: [] }
-  if (!Array.isArray(rawRoutes)) throw new RouteTableError('routes 必须是数组')
-
-  const routes = rawRoutes.map((entry, index) => {
-    const context = `routes[${index}]`
-    const record = asRecord(entry, context)
-    rejectUnknownKeys(record, ['path', 'provider', 'model', 'reasoningEffort'], context)
-    const rawPath = record['path']
-    if (typeof rawPath !== 'string') throw new RouteTableError(`${context} 缺少字符串字段 path`)
-    return { path: normalizePath(rawPath, home), ...parseSpec(record, context) }
-  })
-  assertNoDuplicates(routes)
-  return { fallback, routes }
 }
 
 function assertNoDuplicates(routes: readonly WorkspaceRoute[]): void {

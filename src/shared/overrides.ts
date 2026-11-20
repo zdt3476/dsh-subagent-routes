@@ -105,9 +105,10 @@ export function resolveEffective(input: EffectiveInput): EffectiveRoute | undefi
 
   // 会话选择：用户在控制台里刚做的决定，排在全局策略与项目规则之前。
   if (session?.mode === 'inherit') return undefined
-  if (session?.mode === 'custom') {
+  if (session?.mode === 'custom' && !isEmptyRoute(session)) {
     const spec = deltaOf(session, explicit)
-    if (!isEmptyRoute(spec)) return { source: 'session', spec }
+    // 会话已显式接管路由决策；即便其字段全被调用方显式覆盖，也不能穿透回工作区规则。
+    return isEmptyRoute(spec) ? undefined : { source: 'session', spec }
   }
 
   // 全局策略为继承：不查路由表，子代理直接拿到主代理的模型。

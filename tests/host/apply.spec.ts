@@ -5,20 +5,41 @@ import { symbols } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply } from '../../src/host/index'
 
-/** 记录一次派活的最小 startActivation 桩，模拟 DSH 的 subagents 服务。 */
+/** 记录派活调用，并按当前 DSH 的能力校验契约拒绝不支持的 agentOptions。 */
 interface Captured {
   spec: Record<string, unknown>
 }
 
+interface FakeProvider {
+  capabilities?: { agentOptions?: boolean }
+}
+
 /**
  * 模拟 DSH 的 SubagentRuntime：startActivation 定义在原型上而不是实例自身上。
- * 这条差异是插件拦截方式的关键——插件依靠「实例自有属性遮蔽原型方法」工作，
- * 若桩用自有属性，就测不出遮蔽与恢复的真实行为。
+ * 该差异是插件拦截方式的关键；入口还按 provider 的能力声明验证 agentOptions，
+ * 若插件注入了不支持的字段，会按宿主契约以 UNSUPPORTED_CAPABILITY 拒绝启动。
  */
 class FakeSubagents {
   readonly captured: Captured[] = []
+  readonly attempted: Captured[] = []
+
+  constructor(private readonly providers: Record<string, FakeProvider | undefined>) {}
+
+  getProvider(name: string): FakeProvider | undefined {
+    return this.providers[name]
+  }
 
   async startActivation(spec: Record<string, unknown>): Promise<unknown> {
+    this.attempted.push({ spec })
+    const request = 'parent' in spec ? spec : spec.request as Record<string, unknown> | undefined
+    const agentOptions = request?.agentOptions
+    const provider = this.providers[String(spec.provider)]
+    if (provider === undefined) throw Object.assign(new Error(`no subagent provider registered for "${String(spec.provider)}"`), { code: 'NO_PROVIDER' })
+    if (agentOptions !== undefined && provider.capabilities?.agentOptions !== true) {
+      throw Object.assign(new Error(`subagent provider "${String(spec.provider)}" does not support the "agentOptions" capability`), {
+        code: 'UNSUPPORTED_CAPABILITY',
+      })
+    }
     this.captured.push({ spec })
     return { childId: 'child-1' }
   }
@@ -30,11 +51,20 @@ function createHarness(options: {
   preflight?: boolean
   explicitOptions?: Record<string, unknown>
   rejectPreflight?: Error
+  providers?: Record<string, FakeProvider | undefined>
+  exposeProviderLookup?: boolean
 }) {
   const warnings: string[] = []
   const infos: string[] = []
 
-  const service = new FakeSubagents()
+  const service = new FakeSubagents(options.providers ?? {
+    spawn: { capabilities: { agentOptions: true } },
+    external: { capabilities: { agentOptions: false } },
+    unknownCapabilities: {},
+  })
+  if (options.exposeProviderLookup === false) {
+    Object.defineProperty(service, 'getProvider', { value: undefined })
+  }
   const workingDirectory = { get: () => options.directory ?? '/work/frontend/src' }
   const llm = {
     resolveCallConfig: vi.fn(async () => {
@@ -158,6 +188,75 @@ describe('DSH 顶层派活参数', () => {
 
     expect(harness.captured[0]!.spec).toBe(spec)
     expect(harness.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+})
+
+describe.each(['flat', 'legacy'] as const)('派活后端能力（%s）', shape => {
+  function activation(harness: ReturnType<typeof createHarness>, backend: string): Record<string, unknown> {
+    const spec = { ...harness.makeActivation(), provider: backend }
+    if (shape === 'flat') return spec
+    const { parent, prompt, agentOptions, ...outer } = spec
+    return { ...outer, request: { parent, prompt, ...(agentOptions === undefined ? {} : { agentOptions }) } }
+  }
+
+  it('后端支持 agentOptions 时继续路由并通过宿主能力检查', async () => {
+    const h = createHarness({ routesFile: routeFile(TABLE) })
+    const original = activation(h, 'spawn')
+    await expect(h.service.startActivation(original)).resolves.toEqual({ childId: 'child-1' })
+    expect(h.service.attempted).toHaveLength(1)
+    const spec = h.captured[0]!.spec
+    const routed = (shape === 'flat' ? spec : spec.request) as Record<string, unknown>
+    expect(routed.agentOptions).toEqual({ provider: 'acme-gateway', model: 'acme-large', reasoningEffort: 'max' })
+    expect(h.llm.resolveCallConfig).toHaveBeenCalledOnce()
+  })
+
+  it.each([true, false])('外部后端不支持时原样启动，无论 preflight=%s', async preflight => {
+    const h = createHarness({ routesFile: routeFile(TABLE), preflight, rejectPreflight: new Error('不应进行模型预检') })
+    const original = activation(h, 'external')
+    await expect(h.service.startActivation(original)).resolves.toEqual({ childId: 'child-1' })
+    expect(h.service.attempted).toHaveLength(1)
+    expect(h.captured).toHaveLength(1)
+    expect(h.captured[0]!.spec).toBe(original)
+    expect(h.llm.resolveCallConfig).not.toHaveBeenCalled()
+    expect(h.infos).toEqual([])
+  })
+
+  it('能力未声明时不注入，并将原请求交给已登记后端', async () => {
+    const h = createHarness({ routesFile: routeFile(TABLE) })
+    const original = activation(h, 'unknownCapabilities')
+    await h.service.startActivation(original)
+    expect(h.service.attempted).toHaveLength(1)
+    expect(h.captured[0]!.spec).toBe(original)
+    expect(h.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+
+  it('旧宿主没有公开能力查询时原样派活', async () => {
+    const h = createHarness({ routesFile: routeFile(TABLE), exposeProviderLookup: false })
+    const original = activation(h, 'spawn')
+    await h.service.startActivation(original)
+    expect(h.service.attempted).toHaveLength(1)
+    expect(h.captured[0]!.spec).toBe(original)
+    expect(h.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+
+  it('调用方主动传入不支持的选项时保留宿主错误，不重试或删除选项', async () => {
+    const explicitOptions = { provider: 'caller-p', model: 'caller-m', maxTokens: 2048 }
+    const h = createHarness({ routesFile: routeFile(TABLE), explicitOptions })
+    const original = activation(h, 'external')
+    await expect(h.service.startActivation(original)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
+    expect(h.service.attempted).toHaveLength(1)
+    expect(h.service.attempted[0]!.spec).toBe(original)
+    expect(h.captured).toEqual([])
+    expect(h.llm.resolveCallConfig).not.toHaveBeenCalled()
+  })
+
+  it('未知后端由宿主按原生契约拒绝，不先报模型路由错误', async () => {
+    const h = createHarness({ routesFile: routeFile(TABLE), rejectPreflight: new Error('不应进行模型预检') })
+    const original = activation(h, 'not-registered')
+    await expect(h.service.startActivation(original)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    expect(h.service.attempted).toHaveLength(1)
+    expect(h.service.attempted[0]!.spec).toBe(original)
+    expect(h.llm.resolveCallConfig).not.toHaveBeenCalled()
   })
 })
 

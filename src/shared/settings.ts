@@ -28,7 +28,7 @@ export interface PluginConfig {
   routesFile: string
   enabled: boolean
   preflight: boolean
-  /** 没有任何规则命中时是继承主代理模型，还是按路由表给通用子代理模型。 */
+  /** 无会话指定时，是跳过整个路由表并继承，还是应用项目规则及全局兜底。 */
   fallbackPolicy: RouteDefaultPolicy
 }
 

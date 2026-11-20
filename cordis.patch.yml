@@ -6,13 +6,14 @@
 # 默认路由表位置：$DSH_HOME/subagent-routes.yaml（通常是 ~/.dsh/subagent-routes.yaml）
 #
 # 需要换位置或在 profile 里调整时，加一条同 id 的 override
-# （注意：同 id 的 override 会替换整个 config，所以要把三个字段都写全）：
+# （注意：同 id 的 override 会替换整个 config，所以要把四个字段都写全）：
 #
 #   - id: subagent-routes
 #     config:
 #       routesFile: ~/.dsh/subagent-routes.yaml
 #       enabled: true
 #       preflight: true
+#       fallbackPolicy: rules
 - insert:
     - id: subagent-routes
       name: '@zdt3476/dsh-subagent-routes'

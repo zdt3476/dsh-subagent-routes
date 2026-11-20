@@ -42,6 +42,13 @@ export function RouteStatusChip({ sessionId, onOpen, api = sessionApi }: RouteSt
     if (isOpen && chipRef.current !== null) popoverStore.open(sessionId, chipRef.current)
   }, [sessionId, isOpen])
 
+  // 药丸卸载或切换会话时移除已注销的触发按钮引用，避免长会话累积脱离 DOM 的节点。
+  useEffect(() => {
+    return () => {
+      popoverStore.unregisterTrigger(sessionId, chipRef.current)
+    }
+  }, [sessionId])
+
   useEffect(() => {
     let live = true
     let generation = 0

@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildSessionSnapshot, createSessionHandler } from '../../src/host/session-api'
 import { OverrideStore } from '../../src/host/overrides'
+import { parseRouteTable } from '../../src/host/routes'
 import { SESSION_PATH } from '../../src/shared/settings'
 
 let directory: string
@@ -244,6 +245,140 @@ describe('固化为项目规则', () => {
     expect(store.get('s1')).toBeDefined()
   })
 
+  it('全局继承时拒绝固化，路由文件和生效的会话指定都保持原样', async () => {
+    const session = { mode: 'custom', provider: 'sess-p', model: 'sess-m' } as const
+    store.set('s1', session)
+    const h = handler({ directory: '/work/frontend/src', fallbackPolicy: 'inherit' })
+    const before = await (await get(h)).json()
+    const response = await put(h, { action: 'freeze', sessionId: 's1' })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error).toMatch(/全局策略.*继承主代理.*会话指定已保留/)
+    expect(readFileSync(routesFile, 'utf8')).toBe(TABLE)
+    expect(store.get('s1')).toEqual(session)
+    expect((await (await get(h)).json()).effective).toEqual(before.effective)
+  })
+
+  it('目标目录先规范化，尾部分隔符不产生重复规则', async () => {
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
+    const h = handler({ directory: '/work/frontend/' })
+    const response = await put(h, { action: 'freeze', sessionId: 's1', path: '/work/frontend/./' })
+
+    expect(response.status).toBe(200)
+    const table = parseRouteTable(readFileSync(routesFile, 'utf8'))
+    expect(table.routes).toEqual([{ path: '/work/frontend', provider: 'sess-p', model: 'sess-m' }])
+    expect(store.get('s1')).toBeUndefined()
+    expect((await response.json()).effective.spec).toEqual({ provider: 'sess-p', model: 'sess-m' })
+  })
+
+  it('~ 写法的同目录规则也会被替换', async () => {
+    store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
+    const h = handler({ directory: join(homedir(), 'work', 'app') })
+    writeFileSync(routesFile, 'routes:\n  - path: ~/work/app/\n    provider: old-p\n    model: old-m\n')
+    const response = await put(h, { action: 'freeze', sessionId: 's1', path: '~/work/app/' })
+
+    expect(response.status).toBe(200)
+    expect(parseRouteTable(readFileSync(routesFile, 'utf8')).routes).toEqual([
+      { path: join(homedir(), 'work', 'app'), provider: 'sess-p', model: 'sess-m' },
+    ])
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it('固化保留无关规则的特殊字符、原始路径拼写与注释', async () => {
+    const session = { mode: 'custom', provider: 'null', model: 'new # variant', reasoningEffort: '123' } as const
+    store.set('s1', session)
+    const h = handler({ directory: '/work/new # active' })
+    const original = `# User header
+default: {provider: p, model: "m # fallback"} # Fallback note
+routes:
+  # Archive rule
+  - path: "/work/archive # 2025/"
+    provider: '123'
+    model: 'm # variant' # Model note
+# User footer
+`
+    writeFileSync(routesFile, original)
+    const before = parseRouteTable(original)
+    const response = await put(h, { action: 'freeze', sessionId: 's1' })
+
+    expect(response.status).toBe(200)
+    const text = readFileSync(routesFile, 'utf8')
+    const after = parseRouteTable(text)
+    expect(after.fallback).toEqual(before.fallback)
+    expect(after.routes[0]).toEqual(before.routes[0])
+    expect(after.routes[1]).toEqual({ path: '/work/new # active', provider: 'null', model: 'new # variant', reasoningEffort: '123' })
+    expect(text).toContain('"/work/archive # 2025/"')
+    for (const note of ['# User header', '# User footer', '# Archive rule', '# Fallback note', '# Model note']) expect(text).toContain(note)
+    expect((await response.json()).effective.spec).toEqual({ provider: 'null', model: 'new # variant', reasoningEffort: '123' })
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it.each(['# empty comment\n', '{routes: []}', 'routes: null\n'])('合法空表可以固化且不丢注释：%s', async original => {
+    store.set('s1', { mode: 'custom', provider: 'p', model: 'm' })
+    const h = handler({ directory: '/work/new' })
+    writeFileSync(routesFile, original)
+    const response = await put(h, { action: 'freeze', sessionId: 's1' })
+
+    expect(response.status).toBe(200)
+    const text = readFileSync(routesFile, 'utf8')
+    expect(parseRouteTable(text).routes).toEqual([{ path: '/work/new', provider: 'p', model: 'm' }])
+    if (original.includes('# empty comment')) expect(text).toContain('# empty comment')
+    expect(store.get('s1')).toBeUndefined()
+  })
+
+  it('显式指定不覆盖当前目录时拒绝固化并保留原文件和会话指定', async () => {
+    const session = { mode: 'custom', provider: 'sess-p', model: 'sess-m' } as const
+    store.set('s1', session)
+    const h = handler({ directory: '/work/frontend/src' })
+    const response = await put(h, { action: 'freeze', sessionId: 's1', path: '/other/project' })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error).toMatch(/当前会话.*会话指定已保留/)
+    expect(readFileSync(routesFile, 'utf8')).toBe(TABLE)
+    expect(store.get('s1')).toEqual(session)
+  })
+
+  it('固化到父目录但有更具体规则遮蔽时不清除会话指定', async () => {
+    const session = { mode: 'custom', provider: 'sess-p', model: 'sess-m' } as const
+    store.set('s1', session)
+    const h = handler({ directory: '/work/frontend/src' })
+    const response = await put(h, { action: 'freeze', sessionId: 's1', path: '/work' })
+
+    expect(response.status).toBe(400)
+    expect(readFileSync(routesFile, 'utf8')).toBe(TABLE)
+    expect(store.get('s1')).toEqual(session)
+  })
+
+  it('无法确认当前目录时，无论是否提供显式目标都直接拒绝并保留会话指定', async () => {
+    const session = { mode: 'custom', provider: 'sess-p', model: 'sess-m' } as const
+    store.set('s1', session)
+    const h = handler()
+    for (const payload of [
+      { action: 'freeze', sessionId: 's1' },
+      { action: 'freeze', sessionId: 's1', path: '/work/new' },
+    ]) {
+      const response = await put(h, payload)
+      expect(response.status).toBe(400)
+      expect((await response.json()).error).toMatch(/无法确认会话当前目录/)
+      expect(readFileSync(routesFile, 'utf8')).toBe(TABLE)
+      expect(store.get('s1')).toEqual(session)
+    }
+  })
+
+  it('局部编辑若会改变被别名引用的无关规则，则拒绝保存并保留指定', async () => {
+    const session = { mode: 'custom', reasoningEffort: 'low' } as const
+    store.set('s1', session)
+    const h = handler({ directory: '/work/a' })
+    const original = 'routes:\n  - path: /work/a\n    reasoningEffort: &effort high\n  - path: /work/b\n    reasoningEffort: *effort\n'
+    writeFileSync(routesFile, original)
+    const response = await put(h, { action: 'freeze', sessionId: 's1' })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error).toMatch(/无法安全编辑/)
+    expect(readFileSync(routesFile, 'utf8')).toBe(original)
+    expect(store.get('s1')).toEqual(session)
+  })
+
   it('可以用请求里的 path 指定目标目录', async () => {
     store.set('s1', { mode: 'custom', provider: 'sess-p', model: 'sess-m' })
     const h = handler({ directory: '/work/frontend/src' })
@@ -265,6 +400,18 @@ describe('buildSessionSnapshot', () => {
       warn: vi.fn(),
     })
     expect(snapshot.effective).toMatchObject({ source: 'fallback' })
+  })
+
+  it('会话目录含相对段或尾斜杠时仍正确规范化并命中项目规则', () => {
+    writeFileSync(routesFile, TABLE)
+    const snapshot = buildSessionSnapshot('s1', {
+      rawConfig: { routesFile, enabled: true, preflight: true },
+      store,
+      lookup: { directory: () => '/work/other/../frontend/src/' },
+      warn: vi.fn(),
+    })
+    expect(snapshot.directory).toBe('/work/frontend/src')
+    expect(snapshot.effective).toMatchObject({ source: 'workspace', workspacePath: '/work/frontend' })
   })
 })
 

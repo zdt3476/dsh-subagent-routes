@@ -110,6 +110,16 @@ describe('resolveEffective', () => {
     })
   })
 
+  it('会话指定只设等级且调用方也显式指定等级时，让位而不穿透到工作区路由', () => {
+    expect(
+      resolveEffective({
+        explicit: { reasoningEffort: 'medium' },
+        session: { ...custom, reasoningEffort: 'low' },
+        workspace,
+      }),
+    ).toBeUndefined()
+  })
+
   it('只有调用方等级时没有可注入内容（调用方自己的等级已在请求里）', () => {
     expect(resolveEffective({ explicit: { reasoningEffort: 'high' } })).toBeUndefined()
   })

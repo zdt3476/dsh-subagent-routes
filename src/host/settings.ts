@@ -97,8 +97,20 @@ export function saveTableSettings(file: string, raw: unknown): TableSettings {
     renameSync(temporary, target)
     created = false
   } finally {
-    if (descriptor !== undefined) closeSync(descriptor)
-    if (created) unlinkSync(temporary)
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor)
+      } catch {
+        // 清理失败不掩盖原始写入异常。
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(temporary)
+      } catch {
+        // 临时文件清理失败不掩盖原始写入异常。
+      }
+    }
   }
   return readTableSettings(file)
 }

@@ -66,6 +66,7 @@ export function RoutePopover({ sessionId, api }: RoutePopoverProps): ReactElemen
   useEffect(() => {
     if (!isOpen) return
     let focused = false
+    let observer: MutationObserver | undefined
     const focusPreferred = () => {
       if (focused) return
       const node = containerRef.current
@@ -74,10 +75,11 @@ export function RoutePopover({ sessionId, api }: RoutePopoverProps): ReactElemen
       if (target) {
         target.focus({ preventScroll: true })
         focused = true
+        observer?.disconnect()
       }
     }
     const frame = requestAnimationFrame(focusPreferred)
-    const observer = new MutationObserver(focusPreferred)
+    observer = new MutationObserver(focusPreferred)
     if (containerRef.current) observer.observe(containerRef.current, { childList: true, subtree: true })
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return

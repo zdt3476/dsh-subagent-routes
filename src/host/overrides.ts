@@ -9,7 +9,7 @@
  * 全局策略，不该让整个派活路径失败。
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { SessionRecord } from '../shared/overrides'
@@ -105,14 +105,19 @@ export class OverrideStore {
     for (const [sessionId, value] of Object.entries(sessions as Record<string, unknown>)) {
       if (sessionId === '') continue
       const record = parseRecord(value)
-      if (record !== undefined) table[sessionId] = record
+      if (record !== undefined) {
+        // 用 defineProperty 写入自有属性，避免 "__proto__" 等键名改写原型链。
+        Object.defineProperty(table, sessionId, { value: record, enumerable: true, writable: true, configurable: true })
+      }
     }
     return table
   }
 
   /** 读取单个会话的选择（不含内部时间戳）。 */
   get(sessionId: string): SessionRecord | undefined {
-    const record = this.read()[sessionId]
+    const table = this.read()
+    if (!Object.hasOwn(table, sessionId)) return undefined
+    const record = table[sessionId]
     return record === undefined ? undefined : toRecord(record)
   }
 
@@ -122,32 +127,54 @@ export class OverrideStore {
    * 写盘前先把整表读出来再合并：并发派活不该让两次写入互相覆盖。
    */
   set(sessionId: string, record: SessionRecord | undefined): void {
-    const table = { ...this.read() }
-    if (record === undefined) delete table[sessionId]
-    else table[sessionId] = { ...record, updatedAt: Date.now() } as StoredRecord
+    const table = new Map<string, StoredRecord>(Object.entries(this.read()))
+    if (record === undefined) table.delete(sessionId)
+    else table.set(sessionId, { ...record, updatedAt: Date.now() } as StoredRecord)
     this.write(table)
   }
 
   /** 把整表裁剪到上限并原子落盘。 */
-  private write(table: Record<string, StoredRecord>): void {
-    const entries = Object.entries(table)
+  private write(table: Map<string, StoredRecord>): void {
+    const entries = [...table.entries()]
       .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
       .slice(0, MAX_SESSIONS)
     const payload: StoredFile = { version: 2, sessions: Object.fromEntries(entries) }
 
     const target = this.file
+    const rejectSymlink = (): void => {
+      try {
+        if (lstatSync(target).isSymbolicLink()) {
+          throw new Error('为避免替换符号链接，拒绝写入会话覆盖文件')
+        }
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+    }
+    rejectSymlink()
     const folder = dirname(target)
     mkdirSync(folder, { recursive: true })
     const temporary = join(folder, `.${basename(target)}.${randomUUID()}.tmp`)
+    let descriptor: number | undefined
     let created = false
     try {
-      writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+      descriptor = openSync(temporary, 'wx', 0o600)
       created = true
+      writeFileSync(descriptor, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8' })
+      closeSync(descriptor)
+      descriptor = undefined
       chmodSync(temporary, 0o600)
+      rejectSymlink()
       // 临时文件与目标同目录：rename 是原子的，读侧不会看到半份 JSON。
       renameSync(temporary, target)
       created = false
     } finally {
+      if (descriptor !== undefined) {
+        try {
+          closeSync(descriptor)
+        } catch {
+          // 清理失败不掩盖主异常。
+        }
+      }
       if (created) {
         try {
           unlinkSync(temporary)

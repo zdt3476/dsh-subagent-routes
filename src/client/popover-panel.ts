@@ -13,7 +13,7 @@
 import { createElement as h, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { RouteSpec, SessionSnapshot } from '../shared/settings'
 import { POPOVER_PANEL_CSS } from './panel-styles'
-import { describe } from './route-text'
+import { describe, SOURCE_TEXT } from './route-text'
 import { createSessionLoader, type SessionLoader } from './panel-loader'
 import { sessionApi, type SessionApi } from './services'
 
@@ -46,12 +46,15 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
   const [manualProvider, setManualProvider] = useState('')
   const [manualModel, setManualModel] = useState('')
 
-  const generation = useRef(0)
   const loader = useRef<SessionLoader | null>(null)
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const adopt = useCallback((next: SessionSnapshot) => {
-    setSnapshot(next)
+    setSnapshot(previous =>
+      next.catalog === undefined && previous?.catalog !== undefined && previous.sessionId === next.sessionId
+        ? { ...next, catalog: previous.catalog }
+        : next,
+    )
   }, [])
 
   useEffect(() => {
@@ -75,7 +78,6 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
     return () => {
       unsubscribe()
       instance.invalidate()
-      generation.current += 1
       loader.current = null
       if (noticeTimer.current !== null) clearTimeout(noticeTimer.current)
     }
@@ -88,24 +90,26 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
     onSuccess?: () => void,
   ): Promise<void> => {
     if (busy !== null) return
-    const token = ++generation.current
+    const currentLoader = loader.current
+    const token = currentLoader?.invalidate()
+    const isActive = (): boolean => currentLoader === null || token === undefined || currentLoader.isCurrent(token)
     setBusy('save')
     setError('')
     setNotice('')
     try {
       const next = await api.save(sessionId, { mode, override })
-      if (token !== generation.current) return
+      if (!isActive()) return
       adopt(next)
       setNotice(successNotice)
       onSuccess?.()
       if (noticeTimer.current !== null) clearTimeout(noticeTimer.current)
       noticeTimer.current = setTimeout(() => setNotice(''), NOTICE_TTL)
     } catch (cause) {
-      if (token === generation.current) {
+      if (isActive()) {
         setError(cause instanceof Error ? cause.message : String(cause))
       }
     } finally {
-      if (token === generation.current) {
+      if (isActive()) {
         setBusy(null)
         setPendingEffort(null)
       }
@@ -192,7 +196,7 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
   }
 
   const handlePickEffort = (effort: string): void => {
-    if (disabled || currentProvider === undefined || currentModel === undefined) return
+    if (disabled || currentProvider === undefined || currentModel === undefined || effort === currentEffort) return
     setPendingEffort(effort)
     void commit('custom', {
       provider: currentProvider,
@@ -216,24 +220,30 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
   // --- 视图渲染：1. 首页 (view === 'home') ---
   const renderHome = () => {
     const effectiveDesc = describe(effective?.spec)
+    const sourceKey = effective?.source ?? 'inherit'
+    const sourceBadge = SOURCE_TEXT[sourceKey]?.label ?? sourceKey
+    const currentSub = locked
+      ? '插件总开关已关闭，任何配置均未生效。'
+      : isCustom
+        ? '本会话显式指定了配置，下一次派活优先使用此配置。'
+        : isInherit
+          ? '本会话强制继承主代理模型，不跟随项目路由规则。'
+          : effective?.source === 'workspace'
+            ? `命中项目规则目录 ${effective.workspacePath}。`
+            : effective?.source === 'fallback'
+              ? '未命中项目规则，当前使用全局兜底配置。'
+              : snapshot.defaultPolicy === 'inherit'
+                ? '跟随全局策略：当前全局策略为继承主代理，不应用项目规则。'
+                : '跟随全局策略：未命中项目规则，子代理将继承主代理模型。'
 
     return [
       h('div', { key: 'current', className: 'srpop-current' },
         h('div', { key: 'top', className: 'srpop-current-top' },
           h('span', { className: 'srpop-current-label' }, '当前实际生效'),
-          h('span', { className: 'srpop-current-badge' },
-            isCustom ? '本会话指定' : isInherit ? '继承主代理' : '跟随全局'),
+          h('span', { className: 'srpop-current-badge' }, sourceBadge),
         ),
         h('div', { key: 'val', className: 'srpop-current-val', title: effectiveDesc }, effectiveDesc),
-        h('div', { key: 'sub', className: 'srpop-current-sub' },
-          locked
-            ? '插件总开关已关闭，任何配置均未生效。'
-            : isCustom
-              ? `本会话显式指定了模型，下一次派活优先使用此配置。`
-              : isInherit
-                ? '本会话强制继承主代理模型，不跟随项目路由规则。'
-                : '跟随全局配置；若命中项目目录路由规则将按规则分发。',
-        ),
+        h('div', { key: 'sub', className: 'srpop-current-sub' }, currentSub),
       ),
 
       h('div', { key: 'modes', className: 'srpop-modes', role: 'group', 'aria-label': '子代理模型配置方式' },
@@ -296,7 +306,7 @@ export function PopoverPanel({ sessionId, api = sessionApi, onClose }: PopoverPa
             h('span', { className: 'srpop-mode-title' }, '指定模型…'),
             h('span', { className: 'srpop-mode-desc' },
               isCustom
-                ? `已选：${currentProvider ?? ''} / ${currentModel ?? ''}`
+                ? `已选：${describe(sessionRecord)}`
                 : '从可用供应商中点选或手动输入'),
           ),
           h('div', { className: 'srpop-mode-tail' },
